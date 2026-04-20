@@ -94,13 +94,15 @@ class PollPolicy {
 }
 
 class StreamManager {
-  constructor(task) {
+  constructor(task, { onNotify = () => {} } = {}) {
     this.task = task;
     this.roomOptions = resolveRoomOptions(task);
     this.room = rooms.create(task.platform, task.room_id, this.roomOptions);
     this.targetUrls = resolveTargetUrls(task);
     this.retryPolicy = new RetryPolicy(task.retryPolicy);
     this.pollPolicy = new PollPolicy(task.pollPolicy);
+    this.onNotify = onNotify;
+    this.lastNotifyType = null;
     this.ffmpeg = new FFmpegService({
       roomId: task.room_id,
       targetUrls: this.targetUrls,
@@ -109,6 +111,7 @@ class StreamManager {
       onStart: () => {
         console.log(`[推流启动] 房间: ${this.task.room_id}`);
         db.updateError(this.task.id, null);
+        this.lastNotifyType = null;
       },
       onError: (err) => {
         if (this.isStopping) return;
@@ -151,9 +154,33 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
+    // 判断错误类型
+    const isOffline = msg.includes('房间未开播') || msg.includes('未开播');
+    const errorType = isOffline ? 'offline' : 'error';
+    
+    // 避免重复通知，只在错误类型变化时通知
+    if (this.lastNotifyType !== errorType) {
+      this.lastNotifyType = errorType;
+      if (isOffline) {
+        console.log(`[${this.task.room_id}] 📌 房间已下播 - 正在监测中，等待主播重新开播...`);
+        this.onNotify({
+          taskId: this.task.id,
+          type: 'offline',
+          message: `主播已下播，正在监测中... (${this.task.platform} ${this.task.room_id})`,
+        });
+      } else {
+        console.log(`[${this.task.room_id}] ⚠️ 遇到错误 - ${msg}`);
+        this.onNotify({
+          taskId: this.task.id,
+          type: 'error',
+          message: `遇到错误: ${msg}`,
+        });
+      }
+    }
+
     const delay = this.pollPolicy.nextDelay(msg);
     this.retryPolicy.reset();
-    console.log(`[${this.task.room_id}] 异常: ${msg}。将在 ${delay / 1000}s 后重试...`);
+    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后重试...`);
     this.scheduleStart(delay);
   }
 
@@ -161,8 +188,18 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
+    if (this.lastNotifyType !== 'ffmpeg_error') {
+      this.lastNotifyType = 'ffmpeg_error';
+      console.log(`[${this.task.room_id}] ⚠️ FFmpeg 错误 - ${msg}`);
+      this.onNotify({
+        taskId: this.task.id,
+        type: 'ffmpeg_error',
+        message: `推流出错: ${msg}`,
+      });
+    }
+
     const delay = this.retryPolicy.nextDelay();
-    console.log(`[${this.task.room_id}] 异常: ${msg}。将在 ${delay / 1000}s 后重试...`);
+    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后重试...`);
     this.scheduleStart(delay);
   }
 
@@ -170,9 +207,19 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, STREAM_ENDED_MESSAGE);
 
+    if (this.lastNotifyType !== 'stream_ended') {
+      this.lastNotifyType = 'stream_ended';
+      console.log(`[${this.task.room_id}] 🔴 直播已结束 - 正在监测下一场直播...`);
+      this.onNotify({
+        taskId: this.task.id,
+        type: 'stream_ended',
+        message: `直播已结束，等待下一场直播...`,
+      });
+    }
+
     const delay = this.pollPolicy.nextDelay(STREAM_ENDED_MESSAGE);
     this.retryPolicy.reset();
-    console.log(`[${this.task.room_id}] 异常: ${STREAM_ENDED_MESSAGE}。将在 ${delay / 1000}s 后重试...`);
+    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后继续监测...`);
     this.scheduleStart(delay);
   }
 

@@ -293,10 +293,21 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await scheduler.refreshTask?.(task);
     const latestTask = db.getTaskById(taskId) || task;
     await ctx.answerCallbackQuery('已触发立即刷新');
-    await ctx.editMessageText(
-      views.renderTaskDetail(latestTask, scheduler.isTaskRunning(latestTask)),
-      { reply_markup: buildTaskDetailKeyboard(latestTask) }
-    );
+
+    const newText = views.renderTaskDetail(latestTask, scheduler.isTaskRunning(latestTask));
+    const newKeyboard = buildTaskDetailKeyboard(latestTask);
+
+    // 检查内容是否变化，避免 Telegram API 错误
+    try {
+      await ctx.editMessageText(newText, { reply_markup: newKeyboard });
+    } catch (err) {
+      if (err.message.includes('message is not modified')) {
+        // 内容未变化，忽略错误
+        console.log(`[${task.room_id}] 刷新检测完成，内容无变化`);
+      } else {
+        throw err;
+      }
+    }
   });
 
   bot.callbackQuery(/^screenshot:(\d+)/, async (ctx) => {
@@ -429,7 +440,56 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   return bot;
 }
 
-module.exports = createRelayBot();
+// 为 bot 实例添加通知功能
+const defaultBot = createRelayBot();
+
+// 存储待发送的通知
+defaultBot.pendingNotifications = [];
+
+// 处理来自 StreamManager 的通知
+defaultBot.handleManagerNotification = function(notification) {
+  const { taskId, type, message } = notification;
+  const task = db.getTaskById(taskId);
+  if (!task) return;
+
+  // 只在状态变化时发送通知
+  const key = `${taskId}-${type}`;
+  if (this._lastNotified && this._lastNotified[key] === message) {
+    return;
+  }
+
+  if (!this._lastNotified) this._lastNotified = {};
+  this._lastNotified[key] = message;
+
+  // 组装通知消息
+  let text = '';
+  switch (type) {
+    case 'offline':
+      text = `📌 房间 ${task.room_id} (${views.platformLabel(task.platform)})\n💬 ${message}`;
+      break;
+    case 'stream_ended':
+      text = `🔴 房间 ${task.room_id} (${views.platformLabel(task.platform)})\n💬 ${message}`;
+      break;
+    case 'error':
+      text = `⚠️ 房间 ${task.room_id} (${views.platformLabel(task.platform)})\n💬 错误: ${message}`;
+      break;
+    case 'ffmpeg_error':
+      text = `❌ 房间 ${task.room_id} (${views.platformLabel(task.platform)})\n💬 ${message}`;
+      break;
+    default:
+      return;
+  }
+
+  // 发送通知
+  const chatId = parseAllowedChatId();
+  if (chatId && typeof this.api?.sendMessage === 'function') {
+    this.api.sendMessage(chatId, text).catch((err) => {
+      console.error('发送 Telegram 通知失败:', err.message);
+    });
+  }
+};
+
+module.exports = defaultBot;
 module.exports.createRelayBot = createRelayBot;
 module.exports.createChatGuard = createChatGuard;
 module.exports.parseAllowedChatId = parseAllowedChatId;

@@ -22,6 +22,5 @@
   "type": "commonjs",
   "directories": {
     "test": "test"
-  },
-  "devDependencies": {}
+  }
 }

@@ -285,7 +285,7 @@ test('createRelayBot wires panel/room/traffic entry points', () => {
   assert.ok(bot.handlers.command.some(({ name }) => name === 'traffic'));
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^manage:(\\d+)/'));
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^refresh:(\\d+)/'));
-  assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^capture:(\\d+)/'));
+  assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^screenshot:(\\d+)/'));
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^p:(bilibili|douyu)$/'));
   assert.ok(bot.handlers.on.some(({ filter }) => filter === 'message:text'));
   assert.ok(bot.handlers.hears.some((entry) => entry.trigger === '📺 管理面板'));
@@ -470,7 +470,7 @@ test('task detail keyboard includes refresh and capture callback actions', () =>
 
   const keyboard = botModule.buildTaskDetailKeyboard({ id: 3, status: 'ENABLED' });
   assert.equal(keyboard.buttons.some((button) => button.data === 'refresh:3'), true);
-  assert.equal(keyboard.buttons.some((button) => button.data === 'capture:3'), true);
+  assert.equal(keyboard.buttons.some((button) => button.data === 'screenshot:3'), true);
 });
 
 test('task detail keyboard no longer includes add-rtmp callback action', () => {

@@ -1,4 +1,14 @@
 require('dotenv').config();
+
+// fluent-ffmpeg 会自动查找系统中的 FFmpeg 或使用 FFMPEG_PATH 环境变量
+if (process.env.FFMPEG_PATH) {
+  console.log('🔧 使用配置的 FFmpeg:', process.env.FFMPEG_PATH);
+  const FFmpeg = require('fluent-ffmpeg');
+  FFmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
+} else {
+  console.log('🔍 使用系统 FFmpeg...');
+}
+
 const defaultDb = require('./src/db');
 const defaultScheduler = require('./src/core/scheduler');
 const defaultBot = require('./src/bot');
@@ -58,6 +68,16 @@ function createApp({
 
     try {
       logger.log('📦 数据库服务：就绪');
+      
+      // 设置 scheduler 的通知回调
+      if (typeof scheduler.setOnNotify === 'function') {
+        scheduler.setOnNotify((notification) => {
+          if (typeof bot?.handleManagerNotification === 'function') {
+            bot.handleManagerNotification(notification);
+          }
+        });
+      }
+      
       scheduler.start();
       logger.log('⚙️ 任务调度器：已启动');
 

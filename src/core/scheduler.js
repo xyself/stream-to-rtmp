@@ -2,9 +2,10 @@ const db = require('../db');
 const StreamManager = require('./manager');
 
 class Scheduler {
-  constructor() {
+  constructor({ onNotify = () => {} } = {}) {
     this.runningManagers = new Map();
     this.timer = null;
+    this.onNotify = onNotify;
   }
 
   buildTaskKey(task) {
@@ -20,7 +21,7 @@ class Scheduler {
   }
 
   createManager(task) {
-    const manager = new StreamManager(task);
+    const manager = new StreamManager(task, { onNotify: this.onNotify });
     this.runningManagers.set(this.buildTaskKey(task), manager);
     return manager;
   }
@@ -105,6 +106,10 @@ class Scheduler {
     this.timer = setInterval(() => this.tick(), interval);
     this.tick();
     console.log('🚀 自动化调度系统已启动');
+  }
+
+  setOnNotify(callback) {
+    this.onNotify = callback;
   }
 
   stopAll() {

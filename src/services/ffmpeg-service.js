@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const FFmpeg = require('fluent-ffmpeg');
 
 class FFmpegService {
   constructor({
@@ -22,12 +22,12 @@ class FFmpegService {
     this.onProgress = onProgress;
     this.onError = onError;
     this.onEnd = onEnd;
-    this.process = null;
+    this.ffmpegCommand = null;
     this.stoppedManually = false;
   }
 
-  buildInputArgs(streamUrl) {
-    const args = [
+  buildInputOptions(streamUrl) {
+    const options = [
       '-loglevel', 'error',
       '-nostdin',
       '-re',
@@ -42,31 +42,23 @@ class FFmpegService {
       const headerString = headerEntries
         .map(([key, value]) => `${key}: ${value}`)
         .join('\r\n');
-      args.push('-headers', headerString);
+      options.push('-headers', headerString);
     }
 
-    args.push('-i', streamUrl);
-    return args;
+    return options;
   }
 
-  buildOutputArgs() {
-    const args = [
+  buildOutputOptions() {
+    const options = [
       '-c:v', 'copy',
       '-c:a', 'aac',
     ];
 
     if (Array.isArray(this.globalOutputOptions) && this.globalOutputOptions.length > 0) {
-      args.push(...this.globalOutputOptions);
+      options.push(...this.globalOutputOptions);
     }
 
-    if (this.targetUrls.length === 1) {
-      args.push('-f', 'flv', this.targetUrls[0]);
-      return args;
-    }
-
-    const tee = this.targetUrls.map((target) => `[f=flv]${target}`).join('|');
-    args.push('-f', 'tee', tee);
-    return args;
+    return options;
   }
 
   start(streamUrl) {
@@ -81,53 +73,61 @@ class FFmpegService {
     this.stop();
     this.stoppedManually = false;
 
-    const args = [
-      ...this.buildInputArgs(streamUrl),
-      ...this.buildOutputArgs(),
-    ];
+    const cmd = FFmpeg(streamUrl);
 
-    const child = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    // 设置输入选项
+    const inputOptions = this.buildInputOptions(streamUrl);
+    cmd.inputOptions(inputOptions);
 
-    this.process = child;
+    // 设置输出选项
+    const outputOptions = this.buildOutputOptions();
+    cmd.outputOptions(outputOptions);
 
-    child.stdout?.on('data', (chunk) => {
-      this.onProgress({ type: 'stdout', message: chunk.toString() });
-    });
+    // 处理输出目标
+    if (this.targetUrls.length === 1) {
+      // 单个输出
+      cmd.outputOptions('-f', 'flv').output(this.targetUrls[0]);
+    } else {
+      // 多个输出 - 使用 tee muxer
+      const tee = this.targetUrls.map((target) => `[f=flv]${target}`).join('|');
+      cmd.outputOptions('-f', 'tee').output(tee);
+    }
 
-    child.stderr?.on('data', (chunk) => {
-      const message = chunk.toString();
-      this.onProgress({ type: 'stderr', message });
-    });
-
-    child.once('spawn', () => {
-      this.onStart(`ffmpeg ${args.join(' ')}`);
-    });
-
-    child.once('error', (error) => {
-      this.process = null;
-      this.onError(error);
-    });
-
-    child.once('close', (code, signal) => {
-      const manualStop = this.stoppedManually;
-      this.process = null;
-
-      if (manualStop) {
-        this.onEnd();
-        return;
+    // 监听事件
+    let startLogged = false;
+    cmd.on('start', (cmdline) => {
+      if (!startLogged) {
+        startLogged = true;
+        this.onStart(cmdline);
       }
-
-      if (code === 0 || signal === 'SIGINT') {
-        this.onEnd();
-        return;
-      }
-
-      this.onError(new Error(`FFmpeg exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`));
     });
 
-    return child;
+    cmd.on('progress', (progress) => {
+      this.onProgress(progress);
+    });
+
+    cmd.on('error', (err) => {
+      this.ffmpegCommand = null;
+      this.onError(err);
+    });
+
+    cmd.on('end', () => {
+      this.ffmpegCommand = null;
+      if (!this.stoppedManually) {
+        this.onEnd();
+      }
+    });
+
+    cmd.on('close', () => {
+      if (!this.stoppedManually && this.ffmpegCommand === cmd) {
+        this.ffmpegCommand = null;
+      }
+    });
+
+    this.ffmpegCommand = cmd;
+    cmd.run();
+
+    return cmd;
   }
 
   captureFrame(streamUrl) {
@@ -136,36 +136,37 @@ class FFmpegService {
     }
 
     return new Promise((resolve, reject) => {
-      const args = [
-        ...this.buildInputArgs(streamUrl),
+      const cmd = FFmpeg(streamUrl);
+
+      // 设置输入选项
+      const inputOptions = this.buildInputOptions(streamUrl);
+      cmd.inputOptions(inputOptions);
+
+      // 设置输出选项 - 单帧 JPEG
+      cmd.outputOptions([
         '-frames:v', '1',
         '-f', 'image2',
         '-vcodec', 'mjpeg',
-        'pipe:1',
-      ];
-
-      const child = spawn('ffmpeg', args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      ]);
 
       const chunks = [];
-      let stderr = '';
       let settled = false;
-      
-      // 设置超时，避免流异常时长时间阻塞
+      let startedStream = false;
+
+      // 设置超时
       const timeout = setTimeout(() => {
         fail(new Error('ffmpeg 执行失败: 截图操作超时'));
-        try {
-          child.kill('SIGKILL');
-        } catch (e) {
-          // 忽略终止过程中的错误
-        }
-      }, 10000); // 10秒超时
+      }, 10000);
 
       const fail = (error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        try {
+          cmd.kill('SIGKILL');
+        } catch (e) {
+          // 忽略错误
+        }
         reject(error);
       };
 
@@ -176,41 +177,40 @@ class FFmpegService {
         resolve(buffer);
       };
 
-      child.stdout?.on('data', (chunk) => {
-        chunks.push(Buffer.from(chunk));
+      cmd.on('start', () => {
+        startedStream = true;
       });
 
-      child.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString();
+      cmd.on('error', (err) => {
+        fail(new Error(`流不可用: ${err.message}`));
       });
 
-      child.once('error', (error) => {
-        fail(new Error(`流不可用: ${error.message}`));
-      });
-
-      child.once('close', (code, signal) => {
-        if (code !== 0) {
-          const detail = stderr.trim() || `退出码 ${code}${signal ? `, 信号 ${signal}` : ''}`;
-          fail(new Error(`ffmpeg 执行失败: ${detail}`));
-          return;
-        }
-
+      cmd.on('end', () => {
         const image = Buffer.concat(chunks);
         if (!image.length) {
           fail(new Error('未获取到有效帧'));
           return;
         }
-
         succeed(image);
       });
+
+      // 使用 pipe 输出到内存
+      const stream = cmd.output('pipe:1');
+      stream.on('data', (chunk) => {
+        if (startedStream) {
+          chunks.push(Buffer.from(chunk));
+        }
+      });
+
+      cmd.run();
     });
   }
 
   stop() {
-    if (this.process) {
+    if (this.ffmpegCommand) {
       this.stoppedManually = true;
-      this.process.kill('SIGINT');
-      this.process = null;
+      this.ffmpegCommand.kill('SIGINT');
+      this.ffmpegCommand = null;
     }
   }
 }
