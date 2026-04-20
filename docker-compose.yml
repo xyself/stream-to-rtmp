@@ -1,0 +1,14 @@
+services:
+  bili-relay:
+    build: .
+    container_name: bili-relay
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      FFMPEG_PATH: ffmpeg
+      DATABASE_PATH: /app/data/data.db
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
