@@ -1,94 +1,95 @@
-# Bilibili / Douyu 直播转推到 YouTube / 多路 RTMP
+# stream-to-rtmp
 
-通过 Telegram 机器人管理直播间任务，把 B 站或斗鱼直播转推到 YouTube 或其他 RTMP 目的地。项目已整理为可直接启动部署的形态，默认入口为 `main.js`。
+通过 Telegram 机器人管理直播转推任务，将 Bilibili / 斗鱼 / 抖音直播自动拉取并推送到 YouTube 或任意 RTMP 目的地，支持单房间多路输出。
 
 ## 功能
 
-- Telegram 机器人控制台
-- 支持 Bilibili / 斗鱼房间
-- 单房间多 RTMP 输出
-- SQLite 持久化任务
-- FFmpeg 自动拉流转推
-- PM2 / Docker 可直接部署
+- Telegram 机器人全程控制，无需服务器面板
+- 支持 Bilibili、斗鱼、抖音平台
+- 单房间多路 RTMP 同时输出
+- 开播/断流/错误自动 Telegram 通知（去重，不轰炸）
+- 开播时自动截图发送
+- 未开播轮询（2 分钟）、断流自动重试（30 秒）
+- SQLite 持久化，支持 Cloudflare R2 数据备份同步
+- Docker / 云平台可直接部署，资源占用低
 
 ## 环境要求
 
-- Node.js 25.8.2+
-- ffmpeg
-- Telegram Bot Token
+- Node.js 22+
+- FFmpeg（容器内已内置）
+- Telegram Bot Token（[@BotFather](https://t.me/BotFather) 获取）
 
 ## 环境变量
 
-创建 `.env`：
+复制 `.env.example` 为 `.env` 并填写：
 
 ```env
-TG_TOKEN=*** Telegram Bot Token
-TG_CHAT_ID=允许操作机器人的 Chat ID
-FFMPEG_PATH=ffmpeg
-# SQLite 数据文件路径；如使用 Docker，建议挂载到 /app/data
-DATABASE_PATH=./data/data.db
-```
+# 必填
+TG_TOKEN=your_bot_token
+TG_CHAT_ID=your_chat_id          # 支持逗号分隔多个 ID
 
-可参考 `.env.example`。
+# 数据库路径（本地开发用此值；Docker 容器内由 Dockerfile 自动覆盖为 /app/data/data.db）
+DATABASE_PATH=./data/data.db
+
+# Cloudflare R2 同步（可选，不填则跳过）
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_BUCKET=
+
+# Web 面板（可选，不填则不启动）
+# PORT=8000
+
+# 自定义 FFmpeg 路径（可选）
+# FFMPEG_PATH=/usr/bin/ffmpeg
+```
 
 ## 本地启动
 
 ```bash
 npm install
 cp .env.example .env
-# 编辑 .env，填入 TG_TOKEN / TG_CHAT_ID
+# 编辑 .env 填入必填项
 node main.js
-```
-
-## PM2 部署
-
-```bash
-npm install
-pm2 start ecosystem.config.js
-pm2 logs live-relay-bot
 ```
 
 ## Docker 部署
 
-先准备 `.env` 文件，然后构建镜像：
-
 ```bash
-docker build -t stream-to-rtmp .
-```
-
-直接启动部署（推荐）：
-
-```bash
+# 构建并启动
 docker compose up -d --build
+
+# 查看日志
+docker compose logs -f
 ```
 
-或手动运行：
+数据库文件持久化在 `./data/data.db`，通过 `volumes: - ./data:/app/data` 挂载。
 
-```bash
-docker run -d \
-  --name stream-to-rtmp \
-  --restart unless-stopped \
-  --env-file .env \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  stream-to-rtmp
-```
+## 云平台部署（Koyeb / Railway 等）
 
-容器启动后会直接执行 `node main.js`，可直接启动部署；数据库与日志建议通过挂载卷持久化。
+1. 配置环境变量（参考上方列表）
+2. 挂载持久卷到 `/app/data`（否则重启数据丢失）
+3. 配置 R2 同步变量，容器启动时自动从 R2 恢复数据
 
-## 目录说明
-
-- `main.js`：统一启动入口
-- `src/bot`：Telegram 机器人
-- `src/core`：调度器与转推管理器
-- `src/db`：SQLite 存储
-- `src/services/ffmpeg-service.js`：FFmpeg 封装
+启动命令已内置：`node scripts/r2-restore.js && node main.js`
 
 ## 使用说明
 
 1. 给机器人发送 `/start`
-2. 点击“管理面板”查看总览
-3. 点击“添加房间”并输入房间号、平台、主 RTMP 地址
-4. 按需追加更多 RTMP 输出
-5. 在“房间管理”里启停、加 RTMP 或删除任务
-6. 在“流量查看”里确认每个房间的累计流量与实时码率
+2. 点击 **添加房间** → 输入平台、房间号、RTMP 地址
+3. 在 **房间管理** 里启停任务、追加多路 RTMP 或删除
+4. 在 **管理面板** 查看运行状态和实时码率
+5. 开播时机器人自动发送通知和截图
+
+## 目录结构
+
+```
+main.js                  启动入口
+scripts/r2-restore.js    容器启动前从 R2 恢复数据
+src/
+  bot/                   Telegram 机器人与命令处理
+  core/                  调度器与推流状态机
+  db/                    SQLite 封装 + R2 同步
+  engines/               平台 API（Bilibili / 斗鱼 / 抖音）
+  services/              FFmpeg 子进程封装
+```

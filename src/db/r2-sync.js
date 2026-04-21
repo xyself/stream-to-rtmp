@@ -89,7 +89,8 @@ function importRoomsIntoDb(database, rooms) {
     INSERT OR IGNORE INTO task_targets (task_id, target_url, created_at) VALUES (?, ?, ?)
   `);
 
-  const doImport = database.transaction(() => {
+  database.exec('BEGIN IMMEDIATE TRANSACTION');
+  try {
     for (const room of rooms) {
       const primary = room.targets?.[0] || null;
       upsertTask.run(room.platform, room.room_id, primary, primary, room.status || 'ENABLED', now);
@@ -100,8 +101,11 @@ function importRoomsIntoDb(database, rooms) {
         }
       }
     }
-  });
-  doImport();
+    database.exec('COMMIT');
+  } catch (err) {
+    database.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 // 上传：从 db store 导出 JSON 到 R2

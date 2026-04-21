@@ -258,9 +258,9 @@ function createApp({
 
     
 
-    // 启动合并后的服务
+    // PORT 有值才启动 Web 服务
 
-    startServer();
+    if (process.env.PORT) startServer();
 
 
 
