@@ -27,8 +27,7 @@ class FFmpegService {
 
     this.ffmpegCommand = null;
     this.stoppedManually = false;
-    this.streamUrl = null; 
-    this.statsEnabled = false;
+    this.streamUrl = null;
     this.killTimeout = null;
 
     this.trafficStats = {
@@ -39,32 +38,8 @@ class FFmpegService {
     };
   }
 
-  /**
-   * 状态切换：修复了旧进程退出干扰新进程状态的 Bug
-   */
-  _switchStats(enable) {
-    if (this.statsEnabled === enable) return false;
-    this.statsEnabled = enable;
-
-    if (this.ffmpegCommand && this.streamUrl) {
-      console.log(`[FFmpeg] 正在${enable ? '开启' : '关闭'}统计并平滑重启...`);
-      const oldCommand = this.ffmpegCommand;
-      this.start(this.streamUrl);
-
-      setTimeout(() => {
-        if (oldCommand && typeof oldCommand.kill === 'function') {
-          oldCommand.kill('SIGTERM');
-          setTimeout(() => {
-            try { oldCommand.kill('SIGKILL'); } catch(e) {}
-          }, 3000);
-        }
-      }, 2000);
-    }
-    return true;
-  }
-
-  enableStats() { return this._switchStats(true); }
-  disableStats() { return this._switchStats(false); }
+  enableStats() { return true; }
+  disableStats() { return true; }
 
   /**
    * 针对 HTTP-FLV 深度优化的输入参数
@@ -72,7 +47,6 @@ class FFmpegService {
   buildInputOptions(streamUrl) {
     const options = [
       '-loglevel', 'warning',
-      ...(this.statsEnabled ? ['-stats'] : []),
       '-nostdin',
     ];
 
