@@ -1,7 +1,7 @@
-FROM node:25
+FROM node:25-alpine
 
-# 安装 FFmpeg（node:25 基于 Debian，ffmpeg-static 可正常工作）
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# 安装 FFmpeg（Alpine 使用 apk）
+RUN apk add --no-cache ffmpeg
 
 WORKDIR /app
 
