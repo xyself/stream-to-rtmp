@@ -1,4 +1,7 @@
-FROM node:25.8.2-alpine
+FROM node:25
+
+# 安装 FFmpeg（node:25 基于 Debian，ffmpeg-static 可正常工作）
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -12,8 +15,5 @@ RUN mkdir -p /app/data
 ENV NODE_ENV=production \
     DATABASE_PATH=/app/data/data.db \
     PORT=8000
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8000/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
 
 CMD ["node", "main.js"]

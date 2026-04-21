@@ -7,10 +7,9 @@ services:
       - .env
     environment:
       NODE_ENV: production
-      FFMPEG_PATH: ffmpeg
+      FFMPEG_PATH: /usr/bin/ffmpeg
       DATABASE_PATH: /app/data/data.db
       PORT: 8000
-      WEB_PORT: 3000
     ports:
       - "8000:8000"  # 健康检查端口
       - "3000:3000"  # Web 监控面板

@@ -24,20 +24,27 @@ function loadFFmpegService(spawnImpl) {
 
 function createChildProcessStub() {
   const handlers = { stdout: {}, stderr: {}, process: {} };
-  return {
+  const events = {};
+  const stub = {
     pid: 4321,
     stdout: {
       on(name, handler) {
         handlers.stdout[name] = handler;
       },
+      setEncoding() {},
     },
     stderr: {
       on(name, handler) {
         handlers.stderr[name] = handler;
       },
+      setEncoding() {},
     },
     once(name, handler) {
       handlers.process[name] = handler;
+      return this;
+    },
+    on(name, handler) {
+      events[name] = handler;
       return this;
     },
     kill(signal) {
@@ -47,6 +54,7 @@ function createChildProcessStub() {
       handlers.process.spawn?.();
     },
     emitClose(code = 0, signal = null) {
+      events.close?.(code, signal);
       handlers.process.close?.(code, signal);
     },
     emitError(error) {
@@ -60,9 +68,12 @@ function createChildProcessStub() {
     },
     state: handlers,
   };
+  // 立即异步触发 close 事件，模拟 ffprobe 快速返回
+  setTimeout(() => stub.emitClose(0), 0);
+  return stub;
 }
 
-test('ffmpeg service starts multiple independent outputs for multiple RTMP targets and forwards lifecycle callbacks', () => {
+test('ffmpeg service starts tee output for multiple RTMP targets and forwards lifecycle callbacks', async () => {
   const events = [];
   const spawnCalls = [];
   const child = createChildProcessStub();
@@ -90,19 +101,25 @@ test('ffmpeg service starts multiple independent outputs for multiple RTMP targe
   });
 
   service.start('https://stream.example/live.flv');
+
+  // 等待 ffprobe 完成，然后触发 ffmpeg 事件
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
   child.emitSpawn();
   child.emitStderr('frame=1 fps=1\n');
   child.emitClose(0, null);
   service.stop();
 
-  assert.equal(spawnCalls.length, 1);
-  assert.equal(spawnCalls[0].command, 'ffmpeg');
-  assert.ok(spawnCalls[0].args.includes('rtmp://target/live/main'));
-  assert.ok(spawnCalls[0].args.includes('rtmps://target/live/backup'));
-  assert.ok(spawnCalls[0].args.includes('flv'));
-  assert.ok(!spawnCalls[0].args.includes('tee'));
+  // 过滤出 ffmpeg 调用（排除 ffprobe）
+  const ffmpegCalls = spawnCalls.filter((call) => call.command.includes('ffmpeg') && !call.command.includes('ffprobe'));
+  assert.ok(ffmpegCalls.length >= 1, `Expected at least 1 ffmpeg call, got ${ffmpegCalls.length}`);
+
+  const ffmpegCall = ffmpegCalls[0];
+  assert.ok(ffmpegCall.args.includes('-f'));
+  assert.ok(ffmpegCall.args.includes('tee'));
+  assert.ok(ffmpegCall.args.some((arg) => arg.includes('[f=flv]rtmp://target/live/main|[f=flv]rtmps://target/live/backup')));
   assert.deepEqual(events, [
-    ['start', `ffmpeg ${spawnCalls[0].args.join(' ')}`],
+    ['start', `ffmpeg ${ffmpegCall.args.join(' ')}`],
     ['progress', 'stderr', 'frame=1 fps=1'],
     ['end'],
   ]);

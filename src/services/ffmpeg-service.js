@@ -39,10 +39,10 @@ class FFmpegService {
 
   buildInputOptions(streamUrl) {
     const options = [
-      '-loglevel', 'debug',
-      '-stats',
+      '-loglevel', 'warning',
+      //'-stats',
+      //'-re',
       '-nostdin',
-      '-re',
       '-reconnect', '1',
       '-reconnect_at_eof', '1',
       '-reconnect_streamed', '1',
@@ -175,10 +175,14 @@ class FFmpegService {
     const outputOptions = this.buildOutputOptions();
     cmd.outputOptions(outputOptions);
 
-    // 处理输出目标 - 每个目标独立输出（避免 tee muxer 兼容性问题）
-    cmd.outputOptions('-f', 'flv').output(this.targetUrls[0]);
-    for (let i = 1; i < this.targetUrls.length; i++) {
-      cmd.output(this.targetUrls[i]).outputOptions([...outputOptions, '-f', 'flv']);
+    // 处理输出目标
+    if (this.targetUrls.length === 1) {
+      // 单个输出
+      cmd.outputOptions('-f', 'flv').output(this.targetUrls[0]);
+    } else {
+      // 多个输出 - 使用 tee muxer
+      const tee = this.targetUrls.map((target) => `[f=flv]${target}`).join('|');
+      cmd.outputOptions('-f', 'tee').output(tee);
     }
 
     // 监听事件

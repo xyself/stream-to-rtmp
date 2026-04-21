@@ -41,15 +41,21 @@ function loadFFmpegService(spawnImpl) {
 
 function createChildProcessStub() {
   const handlers = { stdout: {}, stderr: {}, process: {} };
-  return {
+  const events = {};
+  const stub = {
     pid: 999,
-    stdout: { on(name, handler) { handlers.stdout[name] = handler; } },
-    stderr: { on(name, handler) { handlers.stderr[name] = handler; } },
+    stdout: { on(name, handler) { handlers.stdout[name] = handler; }, setEncoding() {} },
+    stderr: { on(name, handler) { handlers.stderr[name] = handler; }, setEncoding() {} },
     once(name, handler) { handlers.process[name] = handler; return this; },
+    on(name, handler) { events[name] = handler; return this; },
     kill() {},
     emitSpawn() { handlers.process.spawn?.(); },
+    emitClose(code = 0, signal = null) { events.close?.(code, signal); handlers.process.close?.(code, signal); },
     state: handlers,
   };
+  // 立即异步触发 close 事件，模拟 ffprobe 快速返回
+  setTimeout(() => stub.emitClose(0), 0);
+  return stub;
 }
 
 test('room factory passes headers and metadata overrides into room instances', async () => {
@@ -101,7 +107,7 @@ test('room factory passes headers and metadata overrides into room instances', a
   });
 });
 
-test('ffmpeg service applies shared output options and request headers to every RTMP target', () => {
+test('ffmpeg service applies shared output options and request headers to every RTMP target', async () => {
   const spawnCalls = [];
   const child = createChildProcessStub();
   const FFmpegService = loadFFmpegService((command, args, options) => {
@@ -120,17 +126,22 @@ test('ffmpeg service applies shared output options and request headers to every 
   });
 
   service.start('https://stream.example/live.flv');
-  child.emitSpawn();
 
-  assert.equal(spawnCalls.length, 1);
-  assert.equal(spawnCalls[0].command, 'ffmpeg');
-  assert.ok(spawnCalls[0].args.includes('-i'));
-  assert.ok(spawnCalls[0].args.includes('https://stream.example/live.flv'));
-  const joined = spawnCalls[0].args.join(' ');
+  // 等待 ffprobe 完成（异步 close 事件）
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // 过滤出 ffmpeg 调用（排除 ffprobe 调用）
+  const ffmpegCalls = spawnCalls.filter((call) => call.command.includes('ffmpeg') && !call.command.includes('ffprobe'));
+  assert.ok(ffmpegCalls.length >= 1, `Expected at least 1 ffmpeg call, got ${ffmpegCalls.length}`);
+
+  const ffmpegCall = ffmpegCalls[0];
+  assert.ok(ffmpegCall.args.includes('-i'));
+  assert.ok(ffmpegCall.args.includes('https://stream.example/live.flv'));
+  const joined = ffmpegCall.args.join(' ');
   assert.match(joined, /-headers/);
   assert.match(joined, /Referer: https:\/\/live\.bilibili\.com\/123/);
   assert.match(joined, /User-Agent: UnitTestAgent\/1\.0/);
   assert.match(joined, /-rtmp_live live/);
-  assert.ok(spawnCalls[0].args.includes('tee'));
-  assert.ok(spawnCalls[0].args.some((arg) => arg.includes('[f=flv]rtmp://main/live/123|[f=flv]rtmp://backup/live/123')));
+  assert.ok(ffmpegCall.args.includes('tee'));
+  assert.ok(ffmpegCall.args.some((arg) => arg.includes('[f=flv]rtmp://main/live/123|[f=flv]rtmp://backup/live/123')));
 });

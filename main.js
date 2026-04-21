@@ -2,14 +2,22 @@ require('dotenv').config();
 const http = require('http');
 const express = require('express');
 
-// 优先使用环境变量中的 FFmpeg，否则使用 ffmpeg-static 包中的
-let ffmpegPath = process.env.FFMPEG_PATH;
-if (!ffmpegPath) {
-  try {
-    ffmpegPath = require('ffmpeg-static');
-  } catch (err) {
-    // ffmpeg-static 未安装，忽略
-  }
+// 默认使用 ffmpeg-static 包中的 FFmpeg
+// 如需使用自定义 FFmpeg，请在 .env 中设置 FFMPEG_PATH
+let ffmpegPath = null;
+try {
+  ffmpegPath = require('ffmpeg-static');
+} catch (err) {
+  // ffmpeg-static 未安装
+}
+
+// 如果设置了 FFMPEG_PATH，优先使用自定义路径
+if (process.env.FFMPEG_PATH) {
+  ffmpegPath = process.env.FFMPEG_PATH;
+}
+
+if (ffmpegPath) {
+  console.log('🔧 使用 FFmpeg:', ffmpegPath);
 }
 
 if (ffmpegPath) {
