@@ -80,7 +80,7 @@ function createApp({
 
     bot.catch((err) => {
 
-      logger.error('❌ Telegram bot 运行时异常:', err);
+      logger.error('❌ Telegram bot 运行时异常:', err.message ?? err);
 
     });
 
