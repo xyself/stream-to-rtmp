@@ -22,7 +22,7 @@ function createChatGuard(allowedChatId = parseAllowedChatId()) {
   return async (ctx, next) => {
     const chatId = ctx?.chat?.id;
     if (String(chatId) !== allowedChatId) {
-      if (typeof ctx?.answerCallbackQuery === 'function') {
+      if (ctx?.callbackQuery) {
         await ctx.answerCallbackQuery({ text: '❌ 未授权会话', show_alert: true });
       }
       if (typeof ctx?.reply === 'function') {
