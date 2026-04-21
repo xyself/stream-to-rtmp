@@ -136,13 +136,13 @@ function createApp({
 
 
 
-    // 关闭数据库（触发 WAL checkpoint），然后备份到 R2
+    // 先备份到 R2，再关闭数据库
 
     try {
 
-      if (typeof db.close === 'function') db.close();
+      await r2sync.uploadRooms(db);
 
-      await r2sync.uploadDefault();
+      if (typeof db.close === 'function') db.close();
 
     } catch (err) {
 
@@ -292,7 +292,25 @@ function createApp({
 
       logger.log('⚙️ 任务调度器：已启动');
 
+      // 每次用户触发 DB 写操作后，延迟 3 秒上传到 R2（防抖）
 
+      if (r2sync.isConfigured()) {
+
+        let uploadTimer = null;
+
+        db.onWrite = () => {
+
+          clearTimeout(uploadTimer);
+
+          uploadTimer = setTimeout(async () => {
+
+            try { await r2sync.uploadRooms(db); } catch {}
+
+          }, 3000);
+
+        };
+
+      }
 
       processRef.on?.('SIGTERM', () => gracefulShutdown('SIGTERM'));
 

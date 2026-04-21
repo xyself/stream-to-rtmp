@@ -429,13 +429,22 @@ function createStore(filePath = resolveDatabasePath()) {
     }
   };
 
+  let _onWrite = null;
+
   return {
+    set onWrite(fn) { _onWrite = fn; },
+    get onWrite() { return _onWrite; },
+
     addTask(task) {
-      return addTaskTransaction(task);
+      const result = addTaskTransaction(task);
+      _onWrite?.();
+      return result;
     },
 
     addTarget(taskId, targetUrl) {
-      return addTargetTransaction(taskId, targetUrl);
+      const result = addTargetTransaction(taskId, targetUrl);
+      _onWrite?.();
+      return result;
     },
 
     getTaskTargets(taskId) {
@@ -455,7 +464,9 @@ function createStore(filePath = resolveDatabasePath()) {
     },
 
     updateTaskStatus(id, status) {
-      return updateTaskStatusTransaction(id, status);
+      const result = updateTaskStatusTransaction(id, status);
+      _onWrite?.();
+      return result;
     },
 
     updateError(id, errorMsg) {
@@ -463,27 +474,37 @@ function createStore(filePath = resolveDatabasePath()) {
     },
 
     deleteTask(id) {
-      return deleteTaskTransaction(id);
+      const result = deleteTaskTransaction(id);
+      _onWrite?.();
+      return result;
     },
 
     updatePrimaryTarget(taskId, newUrl) {
-      return updatePrimaryTargetTransaction(taskId, newUrl);
+      const result = updatePrimaryTargetTransaction(taskId, newUrl);
+      _onWrite?.();
+      return result;
     },
 
     updateRoomId(taskId, newRoomId) {
-      return updateRoomIdTransaction(taskId, newRoomId);
+      const result = updateRoomIdTransaction(taskId, newRoomId);
+      _onWrite?.();
+      return result;
     },
 
     deleteTargetById(taskId, targetId) {
-      return deleteTargetByIdTransaction(taskId, targetId);
+      const result = deleteTargetByIdTransaction(taskId, targetId);
+      _onWrite?.();
+      return result;
     },
 
     enableAllTasks() {
       enableAllTasksStmt.run();
+      _onWrite?.();
     },
 
     disableAllTasks() {
       disableAllTasksStmt.run();
+      _onWrite?.();
     },
 
     getSetting(key) {
@@ -493,6 +514,7 @@ function createStore(filePath = resolveDatabasePath()) {
 
     setSetting(key, value) {
       setSettingStmt.run(key, String(value));
+      _onWrite?.();
     },
 
     close() {
