@@ -21,12 +21,12 @@ function createChatGuard(allowedChatId = parseAllowedChatId()) {
   if (!allowedChatId) return async (ctx, next) => next();
   return async (ctx, next) => {
     const chatId = ctx?.chat?.id;
-    if (String(chatId) !== allowedChatId) {
+    if (!allowedChatId.has(String(chatId))) {
       if (ctx?.callbackQuery) {
-        await ctx.answerCallbackQuery({ text: '❌ 未授权会话', show_alert: true });
+        await ctx.answerCallbackQuery().catch(() => {});
       }
-      if (typeof ctx?.reply === 'function') {
-        await ctx.reply('❌ 当前会话无权使用这个机器人。');
+      if (chatId) {
+        await ctx.api.leaveChat(chatId).catch(() => {});
       }
       return;
     }

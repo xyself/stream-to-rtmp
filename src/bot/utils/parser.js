@@ -1,6 +1,7 @@
 function parseAllowedChatId(value = process.env.TG_CHAT_ID) {
   if (value === undefined || value === null || value === '') return null;
-  return String(value).trim();
+  const ids = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length > 0 ? new Set(ids) : null;
 }
 
 function parseExtraTargetUrls(input = '') {
