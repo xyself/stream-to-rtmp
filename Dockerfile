@@ -16,4 +16,4 @@ ENV NODE_ENV=production \
     DATABASE_PATH=/app/data/data.db \
     PORT=8000
 
-CMD ["sh", "-c", "node scripts/r2-restore.js && node main.js"]
+CMD ["sh", "-c", "node scripts/restore.js && node main.js"]

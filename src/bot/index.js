@@ -7,6 +7,7 @@ const views = require('./views');
 const { parseAllowedChatId, resetAllSessions } = require('./utils/parser');
 const roomHandlers = require('./handlers/room');
 const rtmpHandlers = require('./handlers/rtmp');
+const gistSync = require('../db/gist-sync');
 
 async function safeEditMessageText(ctx, text, options) {
   try {
@@ -51,7 +52,9 @@ function buildDashboardKeyboard() {
     .text('🔄 刷新全部', 'global_refresh_all')
     .text('🧹 清理重启', 'global_clean_restart')
     .row()
-    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode');
+    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode')
+    .row()
+    .text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
 }
 
 function buildTaskListKeyboard(tasks) {
@@ -250,6 +253,40 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   });
 
+  bot.callbackQuery('global_sync_gist', async (ctx) => {
+    if (!gistSync.isConfigured()) {
+      await ctx.answerCallbackQuery('⚠️ 未配置 GIST_TOKEN / GIST_ID', { show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery('⏳ 正在同步...');
+    const ok = await gistSync.uploadRooms(db);
+    await safeEditMessageText(
+      ctx,
+      views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
+      { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+    );
+    await ctx.reply(ok ? '☁️ 已成功同步到 Gist' : '❌ 同步失败，请检查日志');
+  });
+
+  bot.callbackQuery('global_restore_gist', async (ctx) => {
+    if (!gistSync.isConfigured()) {
+      await ctx.answerCallbackQuery('⚠️ 未配置 GIST_TOKEN / GIST_ID', { show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery('⏳ 正在从 Gist 恢复...');
+    const ok = await gistSync.downloadDefault();
+    if (ok) {
+      scheduler.stopAll();
+      await scheduler.tick?.();
+    }
+    await safeEditMessageText(
+      ctx,
+      views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
+      { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+    );
+    await ctx.reply(ok ? '📥 已从 Gist 恢复，任务已重启' : '❌ 恢复失败，请检查日志');
+  });
+
   bot.callbackQuery('global_toggle_transcode', async (ctx) => {
     const newValue = db.getSetting('transcode_video') === '1' ? '0' : '1';
     db.setSetting('transcode_video', newValue);
@@ -288,20 +325,24 @@ defaultBot.handleManagerNotification = function(notification) {
     default: return;
   }
 
-  const chatId = parseAllowedChatId();
-  if (!chatId || typeof this.api?.sendMessage !== 'function') return;
+  const chatIds = parseAllowedChatId();
+  if (!chatIds || !chatIds.size || typeof this.api?.sendMessage !== 'function') return;
 
-  if (type === 'live_start' && notification.imageBuffer) {
-    this.api.sendPhoto(chatId, new InputFile(notification.imageBuffer, `live_${task.room_id}.jpg`), { caption: text })
-      .catch((err) => {
-        console.error('发送开播截图失败，回退文字通知:', err.message);
-        this.api.sendMessage(chatId, text).catch(() => {});
-      });
-  } else {
-    this.api.sendMessage(chatId, text).catch((err) => {
-      console.error('发送 Telegram 通知失败:', err.message);
-    });
-  }
+  const sendToAll = async () => {
+    for (const chatId of chatIds) {
+      try {
+        if (type === 'live_start' && notification.imageBuffer) {
+          await this.api.sendPhoto(chatId, new InputFile(notification.imageBuffer, `live_${task.room_id}.jpg`), { caption: text });
+        } else {
+          await this.api.sendMessage(chatId, text);
+        }
+      } catch (err) {
+        console.error(`发送 Telegram 通知失败 (chat: ${chatId}):`, err.message);
+      }
+    }
+  };
+
+  sendToAll();
 };
 
 module.exports = defaultBot;

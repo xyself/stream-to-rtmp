@@ -10,12 +10,12 @@
 - 开播/断流/错误自动 Telegram 通知（去重，不轰炸）
 - 开播时自动截图发送
 - 未开播轮询（2 分钟）、断流自动重试（30 秒）
-- SQLite 持久化，支持 Cloudflare R2 数据备份同步
+- SQLite 持久化，支持 GitHub Gist 数据备份同步
 - Docker / 云平台可直接部署，资源占用低
 
 ## 环境要求
 
-- Node.js 22+
+- Node.js 25+
 - FFmpeg（容器内已内置）
 - Telegram Bot Token（[@BotFather](https://t.me/BotFather) 获取）
 
@@ -27,15 +27,13 @@
 # 必填
 TG_TOKEN=your_bot_token
 TG_CHAT_ID=your_chat_id          # 支持逗号分隔多个 ID
-.
+
 # 数据库路径（本地开发用此值；Docker 容器内由 Dockerfile 自动覆盖为 /app/data/data.db）
 DATABASE_PATH=./data/data.db
 
-# Cloudflare R2 同步（可选，不填则跳过）
-R2_ACCOUNT_ID=
-R2_ACCESS_KEY_ID=
-R2_SECRET_ACCESS_KEY=
-R2_BUCKET=
+# GitHub Gist 同步（可选，不填则跳过）
+GIST_TOKEN=github_pat_xxxxxxxx   # 需要 gist scope
+GIST_ID=abc123def456             # Gist URL 末尾的 ID
 
 # Web 面板（可选，不填则不启动）
 # PORT=8000
@@ -69,9 +67,9 @@ docker compose logs -f
 
 1. 配置环境变量（参考上方列表）
 2. 挂载持久卷到 `/app/data`（否则重启数据丢失）
-3. 配置 R2 同步变量，容器启动时自动从 R2 恢复数据
+3. 配置 Gist 同步变量，容器启动时自动从 Gist 恢复数据
 
-启动命令已内置：`node scripts/r2-restore.js && node main.js`
+启动命令已内置：`node scripts/restore.js && node main.js`
 
 ## 使用说明
 
@@ -85,11 +83,11 @@ docker compose logs -f
 
 ```
 main.js                  启动入口
-scripts/r2-restore.js    容器启动前从 R2 恢复数据
+scripts/restore.js       容器启动前从 Gist 恢复数据
 src/
   bot/                   Telegram 机器人与命令处理
   core/                  调度器与推流状态机
-  db/                    SQLite 封装 + R2 同步
+  db/                    SQLite 封装 + Gist 同步
   engines/               平台 API（Bilibili / 斗鱼 / 抖音）
   services/              FFmpeg 子进程封装
 ```

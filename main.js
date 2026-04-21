@@ -32,7 +32,7 @@ const defaultScheduler = require('./src/core/scheduler');
 
 const defaultBot = require('./src/bot');
 
-const r2sync = require('./src/db/r2-sync');
+const gistSync = require('./src/db/gist-sync');
 
 
 
@@ -130,23 +130,15 @@ function createApp({
 
     } catch (err) {
 
-      logger.error('❌ 停止机器人时出错:', err);
-
     }
 
 
-
-    // 先备份到 R2，再关闭数据库
-
+    // 先备份到 Gist，再关闭数据库
     try {
-
-      await r2sync.uploadRooms(db);
-
+      await gistSync.uploadRooms(db);
       if (typeof db.close === 'function') db.close();
-
     } catch (err) {
-
-      logger.error('❌ R2 备份失败:', err.message);
+      logger.error('❌ Gist 备份失败:', err.message);
 
     }
 
@@ -154,7 +146,9 @@ function createApp({
 
     logger.log('✅ 系统已全面退出。');
 
-    processRef.exit?.(0);
+    // 不立即调用 process.exit()，让事件循环自然排空
+    // 兜底：2 秒后强制退出（unref 使其不阻止自然退出）
+    setTimeout(() => processRef.exit?.(0), 2000).unref();
 
   }
 
@@ -292,9 +286,11 @@ function createApp({
 
       logger.log('⚙️ 任务调度器：已启动');
 
-      // 每次用户触发 DB 写操作后，延迟 3 秒上传到 R2（防抖）
+      // 每次用户触发 DB 写操作后，延迟 30 秒同步到 Gist（防抖）
 
-      if (r2sync.isConfigured()) {
+      if (gistSync.isConfigured()) {
+
+        gistSync.seedContentCache(db);
 
         let uploadTimer = null;
 
@@ -304,9 +300,9 @@ function createApp({
 
           uploadTimer = setTimeout(async () => {
 
-            try { await r2sync.uploadRooms(db); } catch {}
+            try { await gistSync.uploadRooms(db); } catch {}
 
-          }, 3000);
+          }, 30000);
 
         };
 

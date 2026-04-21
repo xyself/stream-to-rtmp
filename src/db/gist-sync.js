@@ -1,41 +1,26 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+
+const GIST_API = 'https://api.github.com/gists';
+const FILE_NAME = 'rooms.json';
+
+let _lastUploadedContent = null;
 
 function isConfigured() {
-  return !!(
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET
-  );
+  return !!(process.env.GIST_TOKEN && process.env.GIST_ID);
 }
 
-function createClient() {
-  return new S3Client({
-    region: 'auto',
-    endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: process.env.R2_ACCESS_KEY_ID,
-      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-    },
-  });
+function getHeaders() {
+  return {
+    'Authorization': `Bearer ${process.env.GIST_TOKEN}`,
+    'Accept': 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+    'User-Agent': 'stream-to-rtmp',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
 }
 
-function getKey() {
-  return process.env.R2_KEY || 'rooms.json';
-}
-
-async function streamToBuffer(stream) {
-  const chunks = [];
-  for await (const chunk of stream) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
-// 从 db store 导出房间+RTMP为 JSON
 function exportRooms(db) {
   return db.getAllTasks().map((task) => ({
     platform: task.platform,
@@ -45,7 +30,6 @@ function exportRooms(db) {
   }));
 }
 
-// 将 JSON 数据导入到 SQLite（用于预启动恢复，直接操作文件）
 function importRoomsIntoDb(database, rooms) {
   database.exec(`
     PRAGMA journal_mode = WAL;
@@ -108,55 +92,66 @@ function importRoomsIntoDb(database, rooms) {
   }
 }
 
-// 上传：从 db store 导出 JSON 到 R2
+function seedContentCache(db) {
+  if (_lastUploadedContent !== null) return;
+  const rooms = exportRooms(db);
+  if (rooms.length > 0) {
+    _lastUploadedContent = JSON.stringify(rooms, null, 2);
+    console.log(`[Gist] 缓存已初始化 (${rooms.length} 个房间)`);
+  }
+}
+
 async function uploadRooms(db) {
   if (!isConfigured()) return false;
   try {
     const rooms = exportRooms(db);
     if (rooms.length === 0) {
-      console.log('[R2] 跳过上传：本地无房间数据，避免覆盖 R2');
+      console.log('[Gist] 跳过上传：本地无房间数据，避免覆盖 Gist');
       return false;
     }
-    const json = JSON.stringify(rooms, null, 2);
-    await createClient().send(new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: getKey(),
-      Body: json,
-      ContentType: 'application/json',
-    }));
-    console.log(`[R2] ✅ 已同步 ${rooms.length} 个房间到 R2`);
+    const content = JSON.stringify(rooms, null, 2);
+    if (_lastUploadedContent === content) {
+      console.log('[Gist] ⏭️ 内容无变化，跳过上传');
+      return true;
+    }
+    const res = await fetch(`${GIST_API}/${process.env.GIST_ID}`, {
+      method: 'PATCH',
+      headers: getHeaders(),
+      body: JSON.stringify({ files: { [FILE_NAME]: { content } } }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    _lastUploadedContent = content;
+    console.log(`[Gist] ✅ 已同步 ${rooms.length} 个房间到 Gist`);
     return true;
   } catch (err) {
-    console.error('[R2] ❌ 上传失败:', err.message);
+    console.error('[Gist] ❌ 上传失败:', err.message);
     return false;
   }
 }
 
-// 恢复：从 R2 下载 JSON 并写入本地 SQLite（预启动脚本使用）
 async function restoreRooms(localDbPath) {
   if (!isConfigured()) {
-    console.log('[R2] 未配置，跳过恢复');
+    console.log('[Gist] 未配置，跳过恢复');
     return false;
   }
   try {
-    const res = await createClient().send(new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET,
-      Key: getKey(),
-    }));
-    const buf = await streamToBuffer(res.Body);
-    const rooms = JSON.parse(buf.toString('utf8'));
+    const res = await fetch(`${GIST_API}/${process.env.GIST_ID}`, { headers: getHeaders() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    const file = data.files?.[FILE_NAME];
+    if (!file) {
+      console.log('[Gist] Gist 中暂无 rooms.json，将使用空数据库');
+      return false;
+    }
+    const rooms = JSON.parse(file.content);
     fs.mkdirSync(path.dirname(localDbPath), { recursive: true });
     const database = new DatabaseSync(localDbPath);
     importRoomsIntoDb(database, rooms);
     database.close();
-    console.log(`[R2] ✅ 已从 R2 恢复 ${rooms.length} 个房间`);
+    console.log(`[Gist] ✅ 已从 Gist 恢复 ${rooms.length} 个房间`);
     return true;
   } catch (err) {
-    if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
-      console.log('[R2] 首次部署，R2 暂无数据，将使用空数据库');
-      return false;
-    }
-    console.error('[R2] ❌ 恢复失败:', err.message);
+    console.error('[Gist] ❌ 恢复失败:', err.message);
     return false;
   }
 }
@@ -170,4 +165,4 @@ async function downloadDefault() {
   return restoreRooms(getDefaultLocalPath());
 }
 
-module.exports = { uploadRooms, restoreRooms, downloadDefault, isConfigured };
+module.exports = { uploadRooms, restoreRooms, downloadDefault, isConfigured, importRoomsIntoDb, seedContentCache };

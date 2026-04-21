@@ -166,7 +166,7 @@ class StreamManager {
 
   async start() {
     this.isStopping = false;
-    console.log(`[${this.task.room_id}] 正在准备推流...`);
+    console.log(`[${this.task.room_id}] 正在检查直播间状态...`);
 
     let streamUrl;
     try {
@@ -266,8 +266,17 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
-    // 判断错误类型
-    const isOffline = msg.includes('房间未开播') || msg.includes('未开播');
+    console.log(`[${this.task.room_id}] 捕获到房间错误: "${msg}"`);
+
+    // 判断错误类型：扩大未开播关键词覆盖
+    const lowerMsg = msg.toLowerCase();
+    const isOffline = lowerMsg.includes('房间未开播') ||
+                      lowerMsg.includes('未开播') ||
+                      lowerMsg.includes('主播尚未开播') ||
+                      lowerMsg.includes('not live') ||
+                      lowerMsg.includes('offline') ||
+                      lowerMsg.includes('未直播') ||
+                      lowerMsg.includes('live status is 0');
     const errorType = isOffline ? 'offline' : 'error';
 
     if (isOffline) {
@@ -294,6 +303,7 @@ class StreamManager {
     }
 
     const delay = this.pollPolicy.nextDelay(msg);
+    console.log(`[${this.task.room_id}] 调度下次检查，延迟: ${delay / 1000}s (类型: ${errorType})`);
     this.retryPolicy.reset();
     this.scheduleStart(delay);
   }
