@@ -1,11 +1,9 @@
 const bilibili = require('./bilibili');
 const douyu = require('./douyu');
-// const douyin = require('./douyin'); // 抖音已禁用
 
 const registry = {
   bilibili,
   douyu,
-  // douyin,
 };
 
 function get(platform) {

@@ -75,10 +75,18 @@ function createGrammyStub() {
     }
   }
 
+  class InputFile {
+    constructor(data, filename) {
+      this.data = data;
+      this.filename = filename;
+    }
+  }
+
   return {
     Bot,
     InlineKeyboard,
     Keyboard,
+    InputFile,
     session: () => 'session-middleware',
   };
 }
@@ -217,7 +225,7 @@ test('main keyboard exposes 管理面板、房间管理、添加房间和流量�
   });
 
   const keyboard = botModule.buildMainKeyboard();
-  assert.deepEqual(keyboard.buttons, ['📺 管理面板', '🏠 房间管理', '➕ 添加房间', '|', '📈 流量查看']);
+  assert.deepEqual(keyboard.buttons, ['📺 管理面板', '🏠 房间管理', '➕ 添加房间', '|', '📈 流量查看', '🔔 通知管理', '❌ 取消操作']);
 });
 
 test('registerBotCommands exposes dashboard room management and traffic commands', async () => {
@@ -286,7 +294,7 @@ test('createRelayBot wires panel/room/traffic entry points', () => {
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^manage:(\\d+)/'));
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^refresh:(\\d+)/'));
   assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^screenshot:(\\d+)/'));
-  assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^p:(bilibili|douyu)$/'));
+  assert.ok(bot.handlers.callbackQuery.some(({ pattern }) => String(pattern) === '/^p:(bilibili|douyu|douyin)$/'));
   assert.ok(bot.handlers.on.some(({ filter }) => filter === 'message:text'));
   assert.ok(bot.handlers.hears.some((entry) => entry.trigger === '📺 管理面板'));
   assert.ok(bot.handlers.hears.some((entry) => entry.trigger === '🏠 房间管理'));
@@ -307,6 +315,7 @@ test('dashboard, rooms and traffic handlers render the expected entry views', as
       getTaskById() { return null; },
       updateTaskStatus() {},
       deleteTask() {},
+      resolveDatabasePath() { return '/tmp/nonexistent.db'; },
     },
     schedulerMock: {
       isTaskRunning: () => false,
@@ -324,9 +333,12 @@ test('dashboard, rooms and traffic handlers render the expected entry views', as
       renderTaskList: () => 'legacy-task-list',
       renderTaskDetail: () => '',
       renderSystemStatus: () => 'legacy-status',
-      renderDashboard: (stats) => `dashboard:${stats.totalTasks}/${stats.totalTargets}`,
+      renderDashboard: (data) => `dashboard:${data.stats.totalTasks}/${data.stats.totalTargets}`,
       renderRoomList: (items) => `rooms:${items.length}`,
       renderRoomTraffic: (items) => `traffic:${items.length}`,
+      formatBytes: () => '0 B',
+      progressBar: () => '░░░░░░░░░░',
+      formatUptime: () => '0分钟',
     },
   });
 
@@ -344,110 +356,11 @@ test('dashboard, rooms and traffic handlers render the expected entry views', as
   await trafficHandler(ctx);
 
   assert.equal(replies[0].text, 'dashboard:1/2');
+  assert.ok(replies[0].extra.parse_mode === 'HTML');
   assert.equal(replies[1].text, 'rooms:1');
   assert.equal(replies[2].text, 'traffic:1');
   assert.ok(replies[1].extra.reply_markup);
 });
-
-test('add room conversation saves task immediately after first RTMP address', async () => {
-  const calls = [];
-  const tickCalls = [];
-  const replies = [];
-  const dbMock = {
-    addTask(payload) {
-      calls.push(payload);
-      return { taskId: 1 };
-    },
-    addTarget() {},
-    getAllTasks() { return []; },
-    getTaskById() { return null; },
-    updateTaskStatus() {},
-    deleteTask() {},
-  };
-
-  const botModule = loadBot({
-    dbMock,
-    schedulerMock: {
-      isTaskRunning: () => false,
-      getStats: () => ({}),
-      tick: async () => { tickCalls.push('tick'); },
-    },
-    viewsMock: {
-      platformLabel: (platform) => platform,
-      renderTaskList: () => '',
-      renderTaskDetail: () => '',
-      renderSystemStatus: () => '',
-    },
-  });
-
-  const conversation = createConversationScript([
-    { message: { text: '1001' } },
-    {
-      callbackQuery: { data: 'p:bilibili' },
-      answerCallbackQuery: async () => {},
-    },
-    { message: { text: 'rtmp://main/live/1001' } },
-  ]);
-
-  const ctx = {
-    session: {},
-    reply: async (text) => {
-      replies.push(text);
-    },
-  };
-
-  await botModule.addRoomConversation(conversation, ctx);
-
-  assert.deepEqual(calls, [{
-    platform: 'bilibili',
-    roomId: '1001',
-    targetUrl: 'rtmp://main/live/1001',
-    extraTargetUrls: [],
-  }]);
-  assert.deepEqual(tickCalls, ['tick']);
-  assert.match(replies.at(-1), /额外 RTMP：0 条/);
-  assert.match(replies.at(-1), /\/addrtmp 1001/);
-});
-
-test('add room conversation rejects non-numeric room id before asking platform', async () => {
-  const replies = [];
-  const botModule = loadBot({
-    dbMock: {
-      addTask() { throw new Error('should not be called'); },
-      addTarget() {},
-      getAllTasks() { return []; },
-      getTaskById() { return null; },
-      updateTaskStatus() {},
-      deleteTask() {},
-    },
-    schedulerMock: {
-      isTaskRunning: () => false,
-      getStats: () => ({}),
-      tick: async () => { throw new Error('should not be called'); },
-    },
-    viewsMock: {
-      platformLabel: (platform) => platform,
-      renderTaskList: () => '',
-      renderTaskDetail: () => '',
-      renderSystemStatus: () => '',
-    },
-  });
-
-  const conversation = createConversationScript([
-    { message: { text: 'https://live.bilibili.com/1001' } },
-  ]);
-
-  const ctx = {
-    session: {},
-    reply: async (text) => replies.push(text),
-  };
-
-  await botModule.addRoomConversation(conversation, ctx);
-
-  assert.match(replies[0], /纯数字/);
-  assert.match(replies.at(-1), /房间 ID 只能填写纯数字/);
-});
-
 
 test('task detail keyboard includes refresh and capture callback actions', () => {
   const botModule = loadBot({
@@ -544,5 +457,48 @@ test('parseExtraTargetUrls also accepts rtmps targets', () => {
     botModule.parseExtraTargetUrls('rtmps://dc4-1.rtmp.t.me/s/aaa\nrtmp://b'),
     ['rtmps://dc4-1.rtmp.t.me/s/aaa', 'rtmp://b']
   );
+});
+
+test('parseLiveRoomInput extracts platform and room id from live URLs', () => {
+  const botModule = loadBot({
+    dbMock: {
+      addTask() {},
+      addTarget() {},
+      getAllTasks() { return []; },
+      getTaskById() { return null; },
+      updateTaskStatus() {},
+      deleteTask() {},
+    },
+    schedulerMock: { isTaskRunning: () => false, getStats: () => ({}) },
+    viewsMock: {
+      platformLabel: (platform) => platform,
+      renderTaskList: () => '',
+      renderTaskDetail: () => '',
+      renderSystemStatus: () => '',
+    },
+  });
+
+  const parse = botModule.parseLiveRoomInput;
+
+  // Bilibili 直播链接
+  assert.deepEqual(parse('https://live.bilibili.com/10073117'), { roomId: '10073117', platform: 'bilibili' });
+
+  // 斗鱼直播链接
+  assert.deepEqual(parse('https://www.douyu.com/10073117'), { roomId: '10073117', platform: 'douyu' });
+
+  // 抖音直播链接
+  assert.deepEqual(parse('https://live.douyin.com/123456789'), { roomId: '123456789', platform: 'douyin' });
+
+  // 纯数字
+  assert.deepEqual(parse('10073117'), { roomId: '10073117', platform: null });
+
+  // Bilibili 空间链接 → 友好报错
+  assert.ok(parse('https://space.bilibili.com/10073117').error);
+
+  // 抖音短链接 → 友好报错
+  assert.ok(parse('https://v.douyin.com/iRxxxxx').error);
+
+  // 非法输入
+  assert.ok(parse('hello world').error);
 });
 

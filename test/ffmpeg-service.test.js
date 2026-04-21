@@ -62,7 +62,7 @@ function createChildProcessStub() {
   };
 }
 
-test('ffmpeg service starts tee output for multiple RTMP targets and forwards lifecycle callbacks', () => {
+test('ffmpeg service starts multiple independent outputs for multiple RTMP targets and forwards lifecycle callbacks', () => {
   const events = [];
   const spawnCalls = [];
   const child = createChildProcessStub();
@@ -97,9 +97,10 @@ test('ffmpeg service starts tee output for multiple RTMP targets and forwards li
 
   assert.equal(spawnCalls.length, 1);
   assert.equal(spawnCalls[0].command, 'ffmpeg');
-  assert.ok(spawnCalls[0].args.includes('-f'));
-  assert.ok(spawnCalls[0].args.includes('tee'));
-  assert.ok(spawnCalls[0].args.some((arg) => arg.includes('[f=flv]rtmp://target/live/main|[f=flv]rtmps://target/live/backup')));
+  assert.ok(spawnCalls[0].args.includes('rtmp://target/live/main'));
+  assert.ok(spawnCalls[0].args.includes('rtmps://target/live/backup'));
+  assert.ok(spawnCalls[0].args.includes('flv'));
+  assert.ok(!spawnCalls[0].args.includes('tee'));
   assert.deepEqual(events, [
     ['start', `ffmpeg ${spawnCalls[0].args.join(' ')}`],
     ['progress', 'stderr', 'frame=1 fps=1'],

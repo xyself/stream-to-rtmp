@@ -54,6 +54,16 @@ test('start uses room object and ffmpeg service for process startup', async () =
     }
 
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({
@@ -91,6 +101,16 @@ test('manager hydrates RTMP targets from db when task payload does not include t
     }
 
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({
@@ -129,6 +149,16 @@ test('handleError records failure and schedules retry through retry policy', () 
 
   class FFmpegServiceMock {
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({

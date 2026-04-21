@@ -26,37 +26,6 @@ class BilibiliEngine {
   }
 
   /**
-   * 获取房间信息：主播名、房间名、开播状态
-   */
-  async getInfo(roomId, options = {}) {
-    const realId = await this.getRealId(roomId, options);
-    const headers = buildHeaders({ 'User-Agent': this.agent }, options.headers);
-
-    const roomRes = await axios.get(
-      `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${realId}&from=room`,
-      { headers }
-    );
-    if (roomRes.data.code !== 0) throw new Error('B站房间不存在');
-
-    const roomData = roomRes.data.data;
-    const isLive = roomData.live_status === 1;
-    const roomName = roomData.title || '';
-
-    let hostName = '';
-    try {
-      const userRes = await axios.get(
-        `https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid=${realId}`,
-        { headers }
-      );
-      if (userRes.data.code === 0) {
-        hostName = userRes.data.data?.info?.uname || '';
-      }
-    } catch {}
-
-    return { hostName, roomName, isLive, realId };
-  }
-
-  /**
    * 对应 Go 中的 GetStreamInfos 核心逻辑
    */
   async getStreamUrl(roomId, options = {}) {

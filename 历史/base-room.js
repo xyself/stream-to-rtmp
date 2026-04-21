@@ -17,16 +17,6 @@ class BaseRoom {
       metadata: this.metadata,
     });
   }
-
-  async getInfo() {
-    if (typeof this.engine.getInfo !== 'function') {
-      return { hostName: '', roomName: '', isLive: false };
-    }
-    return this.engine.getInfo(this.roomId, {
-      headers: this.headers,
-      metadata: this.metadata,
-    });
-  }
 }
 
 module.exports = BaseRoom;

@@ -68,7 +68,9 @@ class Scheduler {
       if (!this.runningManagers.has(taskKey)) {
         console.log(`[调度器] 发现新任务: ${taskKey}，正在启动...`);
         const manager = this.createManager(task);
-        manager.start();
+        Promise.resolve(manager.start()).catch((err) => {
+          console.error(`[调度器] 任务 ${taskKey} 启动失败:`, err.message);
+        });
       }
     }
   }

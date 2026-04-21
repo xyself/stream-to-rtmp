@@ -1,12 +1,20 @@
 require('dotenv').config();
+const http = require('http');
+const express = require('express');
 
-// fluent-ffmpeg 会自动查找系统中的 FFmpeg 或使用 FFMPEG_PATH 环境变量
-if (process.env.FFMPEG_PATH) {
-  console.log('🔧 使用配置的 FFmpeg:', process.env.FFMPEG_PATH);
+// 优先使用环境变量中的 FFmpeg，否则使用 ffmpeg-static 包中的
+let ffmpegPath = process.env.FFMPEG_PATH;
+if (!ffmpegPath) {
+  try {
+    ffmpegPath = require('ffmpeg-static');
+  } catch (err) {
+    // ffmpeg-static 未安装，忽略
+  }
+}
+
+if (ffmpegPath) {
   const FFmpeg = require('fluent-ffmpeg');
-  FFmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
-} else {
-  console.log('🔍 使用系统 FFmpeg...');
+  FFmpeg.setFfmpegPath(ffmpegPath);
 }
 
 const defaultDb = require('./src/db');
@@ -24,6 +32,7 @@ function createApp({
 
   let shuttingDown = false;
   let readySent = false;
+  let server = null; // 合并为一个 server 实例
 
   function sendReady() {
     if (readySent) return;
@@ -50,6 +59,11 @@ function createApp({
       scheduler.stopAll();
     }
 
+    // 关闭合并后的 Web 服务
+    if (server) {
+      server.close();
+    }
+
     try {
       if (!bot || typeof bot.isRunning !== 'function' || bot.isRunning()) {
         await bot?.stop?.();
@@ -63,8 +77,67 @@ function createApp({
     processRef.exit?.(0);
   }
 
+  function startServer() {
+    const app = express();
+    // 只使用 PORT
+    const port = parseInt(process.env.PORT, 10) || 8000;
+
+    // 1. 健康检查接口
+    app.get('/health', (req, res) => {
+      res.json({ status: 'ok', uptime: process.uptime() });
+    });
+
+    // 2. 流量监控面板主页
+    app.get('/', (req, res) => {
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>流量监控</title>
+          <style>
+            body { font-family: monospace; margin: 20px; background: #000; color: #0f0; }
+            #flow { font-size: 20px; font-weight: bold; }
+          </style>
+        </head>
+        <body>
+          <h1>📊 实时流量</h1>
+          <div id="flow">加载中...</div>
+          <p style="color: #888; font-size: 12px;">每小时刷新一次</p>
+          <script>
+            async function update() {
+              try {
+                const res = await fetch('/api/flow');
+                const data = await res.json();
+                document.getElementById('flow').innerHTML = \`转播中: \${data.active} | 今日: \${data.today}\`;
+              } catch (e) {
+                document.getElementById('flow').innerHTML = '获取数据失败';
+              }
+            }
+            update();
+            setInterval(update, 3600000);
+          </script>
+        </body>
+        </html>
+      `);
+    });
+
+    // 3. 流量监控数据 API
+    app.get('/api/flow', (req, res) => {
+      const active = (typeof scheduler.getRunning === 'function') ? scheduler.getRunning().length : 0;
+      res.json({ active, today: 0 });
+    });
+
+    server = app.listen(port, () => {
+      logger.log(`🌐 Web 面板及健康检查服务已启动，端口: ${port}`);
+    });
+  }
+
   async function bootstrap() {
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');
+    
+    // 启动合并后的服务
+    startServer();
 
     try {
       logger.log('📦 数据库服务：就绪');

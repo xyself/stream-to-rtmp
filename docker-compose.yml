@@ -9,6 +9,21 @@ services:
       NODE_ENV: production
       FFMPEG_PATH: ffmpeg
       DATABASE_PATH: /app/data/data.db
+      PORT: 8000
+      WEB_PORT: 3000
+    ports:
+      - "8000:8000"  # 健康检查端口
+      - "3000:3000"  # Web 监控面板
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

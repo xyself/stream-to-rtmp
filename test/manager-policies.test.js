@@ -30,6 +30,16 @@ test('manager uses poll policy when room is not live yet', async () => {
 
   class FFmpegServiceMock {
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({
@@ -81,6 +91,16 @@ test('manager uses retry policy when ffmpeg exits with error', () => {
     }
 
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({
@@ -127,6 +147,16 @@ test('manager returns to poll policy when stream ends normally', () => {
     }
 
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({
@@ -174,6 +204,16 @@ test('manager resets both policies after successful ffmpeg start', async () => {
     }
 
     stop() {}
+
+    getTrafficStats() {
+      return {
+        sessionBytes: 0,
+        bitrateKbps: 0,
+        updatedAt: null,
+        startedAt: null,
+        running: false,
+      };
+    }
   }
 
   const StreamManager = loadManager({

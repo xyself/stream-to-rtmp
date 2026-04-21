@@ -1,11 +1,9 @@
 const BilibiliRoom = require('./bilibili-room');
 const DouyuRoom = require('./douyu-room');
-const DouyinRoom = require('./douyin-room');
 
 const registry = {
   bilibili: BilibiliRoom,
   douyu: DouyuRoom,
-  douyin: DouyinRoom,
 };
 
 function create(platform, roomId, options = {}) {

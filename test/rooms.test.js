@@ -27,9 +27,19 @@ test('room factory returns wrapped room instance for supported platform', async 
     }
   }
 
+  class FakeDouyinRoom {
+    constructor(roomId) {
+      this.roomId = roomId;
+    }
+    async getStreamUrl() {
+      return `douyin:${this.roomId}`;
+    }
+  }
+
   Module._load = function patched(request, parent, isMain) {
     if (request === './bilibili-room') return FakeBilibiliRoom;
     if (request === './douyu-room') return FakeDouyuRoom;
+    if (request === './douyin-room') return FakeDouyinRoom;
     return originalLoad.apply(this, arguments);
   };
 
@@ -37,10 +47,12 @@ test('room factory returns wrapped room instance for supported platform', async 
     const rooms = require(roomFactoryPath);
     const bilibili = rooms.create('bilibili', '1001');
     const douyu = rooms.create('douyu', '2002');
+    const douyin = rooms.create('douyin', '3003');
 
     assert.equal(await bilibili.getStreamUrl(), 'bilibili:1001');
     assert.equal(await douyu.getStreamUrl(), 'douyu:2002');
-    assert.throws(() => rooms.create('huya', '3003'), /Unsupported platform: huya/);
+    assert.equal(await douyin.getStreamUrl(), 'douyin:3003');
+    assert.throws(() => rooms.create('huya', '4004'), /Unsupported platform: huya/);
   } finally {
     Module._load = originalLoad;
   }

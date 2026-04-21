@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const defaultDatabasePath = path.resolve(process.cwd(), 'data/data.db');
+// 使用绝对路径，而不是相对路径，避免因启动目录不同导致数据库路径漂移
+const defaultDatabasePath = path.join(__dirname, '../../data/data.db');
 
 function resolveDatabasePath() {
   const configured = process.env.DATABASE_PATH;
@@ -69,6 +70,11 @@ function initializeSchema(database) {
       created_at TEXT NOT NULL,
       UNIQUE(task_id, target_url),
       FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -201,6 +207,30 @@ function createStore(filePath = resolveDatabasePath()) {
   const deleteTaskStmt = database.prepare(`
     DELETE FROM tasks WHERE id = ?
   `);
+  const updatePrimaryUrlStmt = database.prepare(`
+    UPDATE tasks SET primary_target_url = ?, target_url = ? WHERE id = ?
+  `);
+  const deleteTargetByUrlStmt = database.prepare(`
+    DELETE FROM task_targets WHERE task_id = ? AND target_url = ?
+  `);
+  const updateRoomIdStmt = database.prepare(`
+    UPDATE tasks SET room_id = ? WHERE id = ?
+  `);
+  const deleteTargetByIdStmt = database.prepare(`
+    DELETE FROM task_targets WHERE id = ? AND task_id = ?
+  `);
+  const enableAllTasksStmt = database.prepare(`
+    UPDATE tasks SET status = 'ENABLED'
+  `);
+  const disableAllTasksStmt = database.prepare(`
+    UPDATE tasks SET status = 'DISABLED'
+  `);
+  const getSettingStmt = database.prepare(`
+    SELECT value FROM settings WHERE key = ?
+  `);
+  const setSettingStmt = database.prepare(`
+    INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+  `);
 
   function normalizeTargetUrls(primaryTargetUrl, extraTargetUrls = []) {
     return [primaryTargetUrl, ...extraTargetUrls]
@@ -268,12 +298,118 @@ function createStore(filePath = resolveDatabasePath()) {
     }
   };
 
-  return {
-    addTask(task) {
-      return addTaskTransaction(task);
-    },
+  const updateErrorTransaction = (id, errorMsg) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const result = updateErrorStmt.run(errorMsg, Number(id));
+      database.exec('COMMIT');
+      return { changes: result.changes };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
 
-    addTarget(taskId, targetUrl) {
+  const updateTaskStatusTransaction = (id, status) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const result = updateTaskStatusStmt.run(status, Number(id));
+      database.exec('COMMIT');
+      return { changes: result.changes };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const deleteTaskTransaction = (id) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const result = deleteTaskStmt.run(Number(id));
+      database.exec('COMMIT');
+      return { changes: result.changes };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const updatePrimaryTargetTransaction = (taskId, newUrl) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const numericTaskId = Number(taskId);
+      const cleaned = typeof newUrl === 'string' ? newUrl.trim() : '';
+      if (!cleaned) {
+        throw new Error('RTMP 地址不能为空');
+      }
+
+      const task = findTaskByIdStmt.get(numericTaskId);
+      if (!task) {
+        throw new Error(`任务不存在: ${taskId}`);
+      }
+
+      const oldUrl = task.primary_target_url || task.target_url;
+
+      updatePrimaryUrlStmt.run(cleaned, cleaned, numericTaskId);
+
+      if (oldUrl) {
+        deleteTargetByUrlStmt.run(numericTaskId, oldUrl);
+      }
+
+      insertTarget(numericTaskId, cleaned);
+
+      database.exec('COMMIT');
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const updateRoomIdTransaction = (taskId, newRoomId) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const numericTaskId = Number(taskId);
+      const cleaned = typeof newRoomId === 'string' ? newRoomId.trim() : '';
+      if (!cleaned || !/^\d+$/.test(cleaned)) {
+        throw new Error('房间 ID 只能是纯数字');
+      }
+
+      const task = findTaskByIdStmt.get(numericTaskId);
+      if (!task) {
+        throw new Error(`任务不存在: ${taskId}`);
+      }
+
+      updateRoomIdStmt.run(cleaned, numericTaskId);
+      database.exec('COMMIT');
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const deleteTargetByIdTransaction = (taskId, targetId) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const numericTaskId = Number(taskId);
+      const numericTargetId = Number(targetId);
+
+      deleteTargetByIdStmt.run(numericTargetId, numericTaskId);
+
+      const remaining = selectTaskTargetsStmt.all(numericTaskId);
+      const newPrimary = remaining[0]?.target_url || null;
+      updatePrimaryUrlStmt.run(newPrimary, newPrimary, numericTaskId);
+
+      database.exec('COMMIT');
+      return { remaining: remaining.length };
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  const addTargetTransaction = (taskId, targetUrl) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
       const cleaned = typeof targetUrl === 'string' ? targetUrl.trim() : '';
       if (!cleaned) {
         throw new Error('RTMP 地址不能为空');
@@ -284,7 +420,22 @@ function createStore(filePath = resolveDatabasePath()) {
         throw new Error(`任务不存在: ${taskId}`);
       }
 
-      return insertTarget(taskId, cleaned);
+      const result = insertTarget(taskId, cleaned);
+      database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+  return {
+    addTask(task) {
+      return addTaskTransaction(task);
+    },
+
+    addTarget(taskId, targetUrl) {
+      return addTargetTransaction(taskId, targetUrl);
     },
 
     getTaskTargets(taskId) {
@@ -304,18 +455,44 @@ function createStore(filePath = resolveDatabasePath()) {
     },
 
     updateTaskStatus(id, status) {
-      const result = updateTaskStatusStmt.run(status, Number(id));
-      return { changes: result.changes };
+      return updateTaskStatusTransaction(id, status);
     },
 
     updateError(id, errorMsg) {
-      const result = updateErrorStmt.run(errorMsg, Number(id));
-      return { changes: result.changes };
+      return updateErrorTransaction(id, errorMsg);
     },
 
     deleteTask(id) {
-      const result = deleteTaskStmt.run(Number(id));
-      return { changes: result.changes };
+      return deleteTaskTransaction(id);
+    },
+
+    updatePrimaryTarget(taskId, newUrl) {
+      return updatePrimaryTargetTransaction(taskId, newUrl);
+    },
+
+    updateRoomId(taskId, newRoomId) {
+      return updateRoomIdTransaction(taskId, newRoomId);
+    },
+
+    deleteTargetById(taskId, targetId) {
+      return deleteTargetByIdTransaction(taskId, targetId);
+    },
+
+    enableAllTasks() {
+      enableAllTasksStmt.run();
+    },
+
+    disableAllTasks() {
+      disableAllTasksStmt.run();
+    },
+
+    getSetting(key) {
+      const row = getSettingStmt.get(key);
+      return row ? row.value : null;
+    },
+
+    setSetting(key, value) {
+      setSettingStmt.run(key, String(value));
     },
   };
 }

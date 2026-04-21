@@ -11,10 +11,12 @@ test('engine registry returns room resolver for supported platform', () => {
 
   const bilibiliStub = { name: 'bilibili-engine' };
   const douyuStub = { name: 'douyu-engine' };
+  const douyinStub = { name: 'douyin-engine' };
 
   Module._load = function patched(request, parent, isMain) {
     if (request === './bilibili') return bilibiliStub;
     if (request === './douyu') return douyuStub;
+    if (request === './douyin') return douyinStub;
     return originalLoad.apply(this, arguments);
   };
 
@@ -22,6 +24,7 @@ test('engine registry returns room resolver for supported platform', () => {
     const registry = require(enginesIndexPath);
     assert.equal(registry.get('bilibili'), bilibiliStub);
     assert.equal(registry.get('douyu'), douyuStub);
+    assert.equal(registry.get('douyin'), douyinStub);
     assert.throws(() => registry.get('huya'), /Unsupported platform: huya/);
   } finally {
     Module._load = originalLoad;
