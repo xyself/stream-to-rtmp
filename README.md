@@ -27,7 +27,7 @@
 # 必填
 TG_TOKEN=your_bot_token
 TG_CHAT_ID=your_chat_id          # 支持逗号分隔多个 ID
-
+.
 # 数据库路径（本地开发用此值；Docker 容器内由 Dockerfile 自动覆盖为 /app/data/data.db）
 DATABASE_PATH=./data/data.db
 
