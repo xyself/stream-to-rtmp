@@ -2,12 +2,11 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main, dev]
+    branches: [dev]
   pull_request:
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
 
-env:
   REGISTRY: docker.io
   IMAGE_NAME: xyself/bili-relay
 
@@ -62,10 +61,15 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
+      - name: Sanitize platform name
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_SAFE=${platform//\//-}" >> $GITHUB_ENV
+
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.platform }}-${{ github.run_id }}
+          name: digests-${{ env.PLATFORM_SAFE }}-${{ github.run_id }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -96,7 +100,7 @@ jobs:
         run: |
           docker buildx imagetools create \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-            ${{ github.ref_name == 'main' && format('-t {0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
+            ${{ github.ref_name == 'dev' && format('-t {0}/{1}:latest', env.REGISTRY, env.IMAGE_NAME) || '' }} \
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect image
