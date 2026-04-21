@@ -1,7 +1,7 @@
 services:
-  bili-relay:
+  stream-to-rtmp:
     build: .
-    container_name: bili-relay
+    container_name: stream-to-rtmp
     restart: unless-stopped
     env_file:
       - .env
@@ -12,7 +12,6 @@ services:
       PORT: 8000
     ports:
       - "8000:8000"  # 健康检查端口
-      - "3000:3000"  # Web 监控面板
     volumes:
       - ./data:/app/data
     healthcheck:

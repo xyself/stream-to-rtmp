@@ -1,5 +1,5 @@
 {
-  "name": "bili-relay",
+  "name": "stream-to-rtmp",
   "version": "1.0.0",
   "description": "Bilibili/Douyu live relay bot with Telegram control panel",
   "main": "main.js",

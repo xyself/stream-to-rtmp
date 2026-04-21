@@ -53,7 +53,7 @@ pm2 logs live-relay-bot
 先准备 `.env` 文件，然后构建镜像：
 
 ```bash
-docker build -t bili-relay .
+docker build -t stream-to-rtmp .
 ```
 
 直接启动部署（推荐）：
@@ -66,12 +66,12 @@ docker compose up -d --build
 
 ```bash
 docker run -d \
-  --name bili-relay \
+  --name stream-to-rtmp \
   --restart unless-stopped \
   --env-file .env \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/logs:/app/logs \
-  bili-relay
+  stream-to-rtmp
 ```
 
 容器启动后会直接执行 `node main.js`，可直接启动部署；数据库与日志建议通过挂载卷持久化。
