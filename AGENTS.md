@@ -5,7 +5,7 @@
 **Architecture**: Scheduler + Per-room Manager + FFmpeg process wrapper
 
 ---
-
+11
 ## Quick Start
 
 **Build/Run Commands**:
