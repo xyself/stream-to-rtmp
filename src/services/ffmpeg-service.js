@@ -47,6 +47,7 @@ class FFmpegService {
   buildInputOptions(streamUrl) {
     const options = [
       '-loglevel', 'warning',
+      '-stats',
       '-nostdin',
     ];
 
@@ -107,6 +108,7 @@ class FFmpegService {
     this.stoppedManually = false;
     this.streamUrl = streamUrl;
     this.trafficStats.startedAt = new Date().toISOString();
+    if (this.killTimeout) { clearTimeout(this.killTimeout); this.killTimeout = null; }
 
     const cmd = FFmpeg(streamUrl);
     cmd.inputOptions(this.buildInputOptions(streamUrl));
@@ -158,11 +160,15 @@ class FFmpegService {
       const chunks = [];
       const cmd = FFmpeg(streamUrl)
         .inputOptions([
-          '-ss', '0', 
-          '-analyzeduration', '1000000', 
+          '-loglevel', 'error',
+          '-nostdin',
+          '-ss', '0',
+          '-analyzeduration', '1000000',
           '-probesize', '1000000',
-          ...this.buildInputOptions(streamUrl),
-          '-an', '-sn'
+          '-an', '-sn',
+          ...Object.entries(this.inputHeaders).filter(([, v]) => v).length > 0
+            ? ['-headers', Object.entries(this.inputHeaders).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join('\r\n')]
+            : [],
         ])
         .outputOptions([
           '-frames:v', '1',

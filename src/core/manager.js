@@ -70,7 +70,7 @@ class RetryPolicy {
 }
 
 class PollPolicy {
-  constructor({ notLiveDelay = 30000, streamEndedDelay = 30000 } = {}) {
+  constructor({ notLiveDelay = 120000, streamEndedDelay = 30000 } = {}) {
     this.notLiveDelay = notLiveDelay;
     this.streamEndedDelay = streamEndedDelay;
     this.notLiveAttempts = 0;
@@ -157,7 +157,6 @@ class StreamManager {
       },
       onEnd: () => {
         if (this.isStopping) return;
-        console.log('[推流结束] 主播可能下播，准备进入轮询...');
         this.handleStreamEnded();
       },
     });
@@ -169,16 +168,21 @@ class StreamManager {
     this.isStopping = false;
     console.log(`[${this.task.room_id}] 正在准备推流...`);
 
+    let streamUrl;
     try {
-      const streamUrl = await this.room.getStreamUrl();
-      this.currentStreamUrl = streamUrl;
-      this.process = this.ffmpeg.start(streamUrl);
-      this.trafficStats.lastRefreshAt = new Date().toISOString();
-      this.retryPolicy.reset();
-      this.pollPolicy.reset();
+      streamUrl = await this.room.getStreamUrl();
     } catch (err) {
+      if (this.isStopping) return;
       this.handleRoomError(err.message);
+      return;
     }
+
+    if (this.isStopping) return;
+    this.currentStreamUrl = streamUrl;
+    this.process = this.ffmpeg.start(streamUrl);
+    this.trafficStats.lastRefreshAt = new Date().toISOString();
+    this.retryPolicy.reset();
+    this.pollPolicy.reset();
   }
 
   async captureSnapshot() {
@@ -265,11 +269,10 @@ class StreamManager {
     // 判断错误类型
     const isOffline = msg.includes('房间未开播') || msg.includes('未开播');
     const errorType = isOffline ? 'offline' : 'error';
-    
-    // 避免重复通知，只在错误类型变化时通知
-    if (this.lastNotifyType !== errorType) {
-      this.lastNotifyType = errorType;
-      if (isOffline) {
+
+    if (isOffline) {
+      if (this.lastNotifyType !== 'offline') {
+        this.lastNotifyType = 'offline';
         console.log(`[${this.task.room_id}] 📌 房间已下播 - 正在监测中，等待主播重新开播...`);
         const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
         this.onNotify({
@@ -277,8 +280,11 @@ class StreamManager {
           type: 'offline',
           message: `主播${hostLabel}已下播，正在监测中...`,
         });
-      } else {
-        console.log(`[${this.task.room_id}] ⚠️ 遇到错误 - ${msg}`);
+      }
+    } else {
+      console.log(`[${this.task.room_id}] ⚠️ 遇到错误 - ${msg}`);
+      if (this.lastNotifyType !== 'error') {
+        this.lastNotifyType = 'error';
         this.onNotify({
           taskId: this.task.id,
           type: 'error',
@@ -289,7 +295,6 @@ class StreamManager {
 
     const delay = this.pollPolicy.nextDelay(msg);
     this.retryPolicy.reset();
-    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后重试...`);
     this.scheduleStart(delay);
   }
 
@@ -298,15 +303,12 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
-    if (this.lastNotifyType !== 'ffmpeg_error') {
-      this.lastNotifyType = 'ffmpeg_error';
-      console.log(`[${this.task.room_id}] ⚠️ FFmpeg 错误 - ${msg}`);
-      this.onNotify({
-        taskId: this.task.id,
-        type: 'ffmpeg_error',
-        message: `推流出错: ${msg}`,
-      });
-    }
+    console.log(`[${this.task.room_id}] ⚠️ FFmpeg 错误 - ${msg}`);
+    this.onNotify({
+      taskId: this.task.id,
+      type: 'ffmpeg_error',
+      message: `推流出错: ${msg}`,
+    });
 
     // 检测流 URL 过期错误（B站等平台的签名过期），立即重新获取新 URL
     const isUrlExpired = msg.includes('Error opening input file') ||
@@ -323,7 +325,6 @@ class StreamManager {
       delay = this.retryPolicy.nextDelay();
     }
 
-    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后重试...`);
     this.scheduleStart(delay);
   }
 
@@ -345,7 +346,6 @@ class StreamManager {
 
     const delay = this.pollPolicy.nextDelay(STREAM_ENDED_MESSAGE);
     this.retryPolicy.reset();
-    console.log(`[${this.task.room_id}] ⏱️ 将在 ${delay / 1000}s 后继续监测...`);
     this.scheduleStart(delay);
   }
 
