@@ -104,6 +104,8 @@ class StreamManager {
     this.onNotify = onNotify;
     this.lastNotifyType = null;
     this._pendingTimer = null;
+    this._notifyTimer = null;
+    this._streamStartedAt = null;
 
     // 流量统计相关
     this.trafficStats = {
@@ -122,12 +124,16 @@ class StreamManager {
       onStart: () => {
         console.log(`[推流启动] 房间: ${this.task.room_id}`);
         db.updateError(this.task.id, null);
+        this._streamStartedAt = Date.now();
 
         const wasOffline = this.lastNotifyType === 'offline' || this.lastNotifyType === 'stream_ended';
         this.lastNotifyType = null;
 
         if (wasOffline) {
-          setTimeout(async () => {
+          if (this._notifyTimer) clearTimeout(this._notifyTimer);
+          this._notifyTimer = setTimeout(async () => { // 等待 CDN 就绪再截图
+            this._notifyTimer = null;
+            if (this.isStopping || !this.ffmpeg.getTrafficStats().running) return;
             let imageBuffer = null;
             try {
               imageBuffer = await this.captureSnapshot();
@@ -148,7 +154,7 @@ class StreamManager {
               message: `🟢 开播了！正在推流中...${infoLine}`,
               imageBuffer,
             });
-          }, 5000);
+          }, 8000);
         }
       },
       onError: (err) => {
@@ -166,7 +172,9 @@ class StreamManager {
 
   async start() {
     this.isStopping = false;
-    console.log(`[${this.task.room_id}] 正在检查直播间状态...`);
+    if (this.lastNotifyType !== 'offline') {
+      console.log(`[${this.task.room_id}] 正在检查直播间状态...`);
+    }
 
     let streamUrl;
     try {
@@ -266,8 +274,6 @@ class StreamManager {
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
-    console.log(`[${this.task.room_id}] 捕获到房间错误: "${msg}"`);
-
     // 判断错误类型：扩大未开播关键词覆盖
     const lowerMsg = msg.toLowerCase();
     const isOffline = lowerMsg.includes('房间未开播') ||
@@ -303,7 +309,9 @@ class StreamManager {
     }
 
     const delay = this.pollPolicy.nextDelay(msg);
-    console.log(`[${this.task.room_id}] 调度下次检查，延迟: ${delay / 1000}s (类型: ${errorType})`);
+    if (!isOffline || this.lastNotifyType !== 'offline') {
+      console.log(`[${this.task.room_id}] 调度下次检查，延迟: ${delay / 1000}s (类型: ${errorType})`);
+    }
     this.retryPolicy.reset();
     this.scheduleStart(delay);
   }
@@ -375,6 +383,10 @@ class StreamManager {
   }
 
   stopStreaming() {
+    if (this._notifyTimer) {
+      clearTimeout(this._notifyTimer);
+      this._notifyTimer = null;
+    }
     this.ffmpeg.stop();
     this.process = null;
   }

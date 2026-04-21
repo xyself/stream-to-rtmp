@@ -48,7 +48,9 @@ class BilibiliEngine {
 
   async getStreamUrl(roomId, options = {}) {
     try {
-      const realId = await this.getRealId(roomId, options);
+      const info = await this.getInfo(roomId, options);
+      if (!info.isLive) throw new Error('主播尚未开播');
+      const realId = info.realId;
       const headers = buildHeaders({
         'User-Agent': this.agent,
         Referer: `https://live.bilibili.com/${realId}`,

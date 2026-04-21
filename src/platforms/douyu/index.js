@@ -76,7 +76,10 @@ class DouyuEngine {
   async getStreamUrl(roomId, options = {}) {
     try {
       const requestHeaders = buildHeaders({ 'User-Agent': this.agent }, options.headers);
-      const realId = await this.fetchRoomID(roomId, requestHeaders);
+
+      const info = await this.getInfo(roomId, options);
+      if (!info.isLive) throw new Error('房间未开播');
+      const realId = info.realId;
 
       const encRes = await axios.get(`https://www.douyu.com/swf_api/homeH5Enc?rids=${realId}`, { headers: requestHeaders });
       const jsCode = encRes.data.data[`room${realId}`];

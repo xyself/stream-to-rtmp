@@ -42,31 +42,27 @@ class FFmpegService {
   disableStats() { return true; }
 
   buildInputOptions(streamUrl) {
-    const options = [
-      '-loglevel', 'warning',
-      '-stats',
-      '-nostdin',
-    ];
+    const preInput = ['-loglevel', 'warning', '-stats', '-nostdin'];
+    const postInput = [];
 
     if (streamUrl.startsWith('http')) {
-      options.push(
+      preInput.push(
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-fflags', 'nobuffer+discardcorrupt',
         '-analyzeduration', '1000000',
-        '-probesize', '1000000',
-        '-rw_timeout', '10000000'
+        '-probesize', '1000000'
       );
+      postInput.push('-fflags', 'nobuffer+discardcorrupt', '-rw_timeout', '10000000');
     }
 
     const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
     if (headerEntries.length > 0) {
       const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
-      options.push('-headers', headerString);
+      preInput.push('-headers', headerString);
     }
 
-    return options;
+    return { preInput, postInput };
   }
 
   buildOutputOptions() {
@@ -101,12 +97,15 @@ class FFmpegService {
     this.trafficStats.startedAt = new Date().toISOString();
     if (this.killTimeout) { clearTimeout(this.killTimeout); this.killTimeout = null; }
 
-    const inputOpts = this.buildInputOptions(streamUrl);
+    const { preInput, postInput } = this.buildInputOptions(streamUrl);
     const outputOpts = this.buildOutputOptions();
 
-    const args = [];
-    args.push('-i', streamUrl);
-    args.push(...inputOpts);
+    const args = [
+      ...preInput,
+      '-i', streamUrl,
+      ...postInput,
+      ...outputOpts,
+    ];
 
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
@@ -114,7 +113,6 @@ class FFmpegService {
       const tee = this.targetUrls.map(t => `[f=flv]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
-    args.push(...outputOpts);
 
     const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     const proc = spawn(ffmpegPath, args);
@@ -132,7 +130,12 @@ class FFmpegService {
     proc.on('exit', (code, signal) => {
       if (this.ffmpegCommand !== proc) return;
       this.ffmpegCommand = null;
-      if (!this.stoppedManually) this.onEnd();
+      if (this.stoppedManually) return;
+      if (code !== 0 && code !== null) {
+        this.onError(new Error(`FFmpeg exited with code ${code}`));
+      } else {
+        this.onEnd();
+      }
     });
 
     this.ffmpegCommand = proc;

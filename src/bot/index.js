@@ -255,7 +255,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   bot.callbackQuery('global_sync_gist', async (ctx) => {
     if (!gistSync.isConfigured()) {
-      await ctx.answerCallbackQuery('⚠️ 未配置 GIST_TOKEN / GIST_ID', { show_alert: true });
+      await ctx.answerCallbackQuery({ text: '⚠️ 未配置 GIST_TOKEN / GIST_ID', show_alert: true });
       return;
     }
     await ctx.answerCallbackQuery('⏳ 正在同步...');
@@ -270,7 +270,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   bot.callbackQuery('global_restore_gist', async (ctx) => {
     if (!gistSync.isConfigured()) {
-      await ctx.answerCallbackQuery('⚠️ 未配置 GIST_TOKEN / GIST_ID', { show_alert: true });
+      await ctx.answerCallbackQuery({ text: '⚠️ 未配置 GIST_TOKEN / GIST_ID', show_alert: true });
       return;
     }
     await ctx.answerCallbackQuery('⏳ 正在从 Gist 恢复...');
