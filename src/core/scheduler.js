@@ -103,6 +103,19 @@ class Scheduler {
     });
   }
 
+  enableAllStats() {
+    let enabled = 0;
+    for (const manager of this.runningManagers.values()) {
+      if (typeof manager.enableStats === 'function') {
+        if (manager.enableStats()) enabled++;
+      }
+    }
+    if (enabled > 0) {
+      console.log(`[Scheduler] 已为 ${enabled} 个任务启用流量统计`);
+    }
+    return enabled;
+  }
+
   start(interval = 30000) {
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), interval);

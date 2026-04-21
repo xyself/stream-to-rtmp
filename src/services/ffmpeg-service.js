@@ -24,36 +24,77 @@ class FFmpegService {
     this.onProgress = onProgress;
     this.onError = onError;
     this.onEnd = onEnd;
+
     this.ffmpegCommand = null;
     this.stoppedManually = false;
-    
-    // 流量统计相关
+    this.streamUrl = null; 
+    this.statsEnabled = false;
+    this.killTimeout = null;
+
     this.trafficStats = {
       sessionBytes: 0,
       bitrateKbps: 0,
       updatedAt: null,
       startedAt: null,
     };
-    this.killTimeout = null;
   }
 
+  /**
+   * 状态切换：修复了旧进程退出干扰新进程状态的 Bug
+   */
+  _switchStats(enable) {
+    if (this.statsEnabled === enable) return false;
+    this.statsEnabled = enable;
+
+    if (this.ffmpegCommand && this.streamUrl) {
+      console.log(`[FFmpeg] 正在${enable ? '开启' : '关闭'}统计并平滑重启...`);
+      const oldCommand = this.ffmpegCommand;
+      this.start(this.streamUrl);
+
+      setTimeout(() => {
+        if (oldCommand && typeof oldCommand.kill === 'function') {
+          oldCommand.kill('SIGTERM');
+          setTimeout(() => {
+            try { oldCommand.kill('SIGKILL'); } catch(e) {}
+          }, 3000);
+        }
+      }, 2000);
+    }
+    return true;
+  }
+
+  enableStats() { return this._switchStats(true); }
+  disableStats() { return this._switchStats(false); }
+
+  /**
+   * 针对 HTTP-FLV 深度优化的输入参数
+   */
   buildInputOptions(streamUrl) {
     const options = [
       '-loglevel', 'warning',
-      //'-stats',
-      //'-re',
+      ...(this.statsEnabled ? ['-stats'] : []),
       '-nostdin',
-      '-reconnect', '1',
-      '-reconnect_at_eof', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
     ];
 
-    const headerEntries = Object.entries(this.inputHeaders).filter(([, value]) => value);
+    if (streamUrl.startsWith('http')) {
+      options.push(
+        // 重连设置
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        // 核心降延迟：禁用内部缓冲，丢弃损坏包
+        '-fflags', 'nobuffer+discardcorrupt', 
+        // 快速分析流格式（秒开）
+        '-analyzeduration', '1000000', 
+        '-probesize', '1000000',
+        // 读写超时 (10秒)，防止因源站不断开连接但无数据导致的进程僵死
+        '-rw_timeout', '10000000' 
+      );
+    }
+
+    const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
     if (headerEntries.length > 0) {
-      const headerString = headerEntries
-        .map(([key, value]) => `${key}: ${value}`)
-        .join('\r\n');
+      const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
       options.push('-headers', headerString);
     }
 
@@ -62,292 +103,119 @@ class FFmpegService {
 
   buildOutputOptions() {
     const options = this.transcodeVideo
-      ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-maxrate', '8000k', '-bufsize', '16000k', '-c:a', 'aac', '-b:a', '128k']
-      : ['-c:v', 'copy', '-c:a', 'aac'];
+      ? [
+          '-c:v', 'libx264', 
+          '-preset', 'veryfast', 
+          '-tune', 'zerolatency', // 转码模式下必须开启零延迟
+          '-crf', '23', 
+          '-maxrate', '3000k', 
+          '-bufsize', '6000k', 
+          '-c:a', 'aac', 
+          '-b:a', '128k'
+        ]
+      : ['-c:v', 'copy', '-c:a', 'copy'];
 
-    if (Array.isArray(this.globalOutputOptions) && this.globalOutputOptions.length > 0) {
+    if (Array.isArray(this.globalOutputOptions)) {
       options.push(...this.globalOutputOptions);
     }
-
     return options;
   }
 
-  parseProgressData(progressData) {
-    if (!progressData || typeof progressData !== 'object') {
-      return;
-    }
-
-    try {
-      // fluent-ffmpeg progress: { frames, currentFps, currentKbps, targetSize, timemark, percent }
-      // targetSize 单位 kB, currentKbps 是数字
-      let kbps = 0;
-
-      if (typeof progressData.currentKbps === 'number' && progressData.currentKbps > 0) {
-        kbps = progressData.currentKbps;
-      } else if (progressData.bitrate && typeof progressData.bitrate === 'string') {
-        const match = progressData.bitrate.match(/(\d+\.?\d*)/);
-        if (match) kbps = parseFloat(match[1]);
-      }
-
-      if (typeof progressData.targetSize === 'number' && progressData.targetSize > 0) {
-        this.trafficStats.sessionBytes = progressData.targetSize * 1024;
-      } else if (kbps > 0 && this.trafficStats.startedAt) {
-        const elapsed = (Date.now() - new Date(this.trafficStats.startedAt).getTime()) / 1000;
-        this.trafficStats.sessionBytes = Math.round((kbps / 8) * 1024 * elapsed);
-      }
-
-      if (kbps > 0) this.trafficStats.bitrateKbps = kbps;
-      this.trafficStats.updatedAt = new Date().toISOString();
-
-      this.onProgress(progressData);
-    } catch (err) {
-      console.error('[FFmpegService] 解析进度数据失败:', err.message);
-    }
-  }
-
-  // 从 FFmpeg stderr 字符串解析流量信息（在需要更精确的地方调用）
-  parseStderrProgress(stderrLine) {
-    if (!stderrLine || typeof stderrLine !== 'string') {
-      return;
-    }
-
-    try {
-      // 格式: frame=  123 fps= 45 q=-1.0 Lsize=N/A time=00:00:05.12 bitrate=1024.5kbits/s speed=1.0x
-      const lsizeMatch = stderrLine.match(/Lsize=(\d+(?:\.\d+)?|\w+)/);
-      const bitrateMatch = stderrLine.match(/bitrate=(\d+\.?\d*)\s*kbits?\/s/i);
-
-      if (lsizeMatch && lsizeMatch[1] !== 'N/A') {
-        const bytes = parseInt(lsizeMatch[1], 10);
-        if (!isNaN(bytes)) {
-          this.trafficStats.sessionBytes = Math.max(bytes, this.trafficStats.sessionBytes);
-        }
-      }
-
-      if (bitrateMatch) {
-        this.trafficStats.bitrateKbps = parseFloat(bitrateMatch[1]);
-      }
-
-      if (lsizeMatch || bitrateMatch) {
-        this.trafficStats.updatedAt = new Date().toISOString();
-      }
-    } catch (err) {
-      // 解析失败无需中断流程
-    }
-  }
-
-  getTrafficStats() {
-    return {
-      sessionBytes: this.trafficStats.sessionBytes,
-      bitrateKbps: this.trafficStats.bitrateKbps,
-      updatedAt: this.trafficStats.updatedAt,
-      startedAt: this.trafficStats.startedAt,
-      running: this.ffmpegCommand !== null && !this.stoppedManually,
-    };
-  }
-
   start(streamUrl) {
-    if (!streamUrl) {
-      throw new Error('缺少输入流地址');
+    if (!streamUrl) throw new Error('缺少输入流地址');
+    
+    if (this.ffmpegCommand) {
+      const prevCmd = this.ffmpegCommand;
+      this.ffmpegCommand = null;
+      prevCmd.kill('SIGINT');
     }
 
-    if (!this.targetUrls.length) {
-      throw new Error('缺少推流目标地址');
-    }
-
-    this.stop();
     this.stoppedManually = false;
-
-    // 重置本次会话统计
-    this.trafficStats = {
-      sessionBytes: 0,
-      bitrateKbps: 0,
-      updatedAt: null,
-      startedAt: new Date().toISOString(),
-    };
+    this.streamUrl = streamUrl;
+    this.trafficStats.startedAt = new Date().toISOString();
 
     const cmd = FFmpeg(streamUrl);
+    cmd.inputOptions(this.buildInputOptions(streamUrl));
+    cmd.outputOptions(this.buildOutputOptions());
 
-    // 设置输入选项
-    const inputOptions = this.buildInputOptions(streamUrl);
-    cmd.inputOptions(inputOptions);
-
-    // 设置输出选项
-    const outputOptions = this.buildOutputOptions();
-    cmd.outputOptions(outputOptions);
-
-    // 处理输出目标
     if (this.targetUrls.length === 1) {
-      // 单个输出
       cmd.outputOptions('-f', 'flv').output(this.targetUrls[0]);
     } else {
-      // 多个输出 - 使用 tee muxer
-      const tee = this.targetUrls.map((target) => `[f=flv]${target}`).join('|');
+      const tee = this.targetUrls.map(t => `[f=flv]${t}`).join('|');
       cmd.outputOptions('-f', 'tee').output(tee);
     }
 
-    // 监听事件
-    let startLogged = false;
-    cmd.on('start', (cmdline) => {
-      if (!startLogged) {
-        startLogged = true;
-        this.onStart(cmdline);
+    cmd.on('start', (cmdline, proc) => {
+      if (this.ffmpegCommand === cmd) this.onStart(cmdline);
+      
+      if (proc && proc.stderr) {
+        proc.stderr.on('data', data => {
+          data.toString().split('\n').forEach(line => this.parseStderrProgress(line));
+        });
       }
     });
 
-    cmd.on('progress', (progress) => {
-      this.parseProgressData(progress);
+    cmd.on('progress', progress => {
+      if (this.ffmpegCommand === cmd) this.parseProgressData(progress);
     });
 
-    cmd.on('error', (err) => {
+    cmd.on('error', err => {
+      if (this.ffmpegCommand !== cmd) return;
       this.ffmpegCommand = null;
-      if (this.killTimeout) {
-        clearTimeout(this.killTimeout);
-        this.killTimeout = null;
-      }
       this.onError(err);
     });
 
     cmd.on('end', () => {
+      if (this.ffmpegCommand !== cmd) return;
       this.ffmpegCommand = null;
-      if (this.killTimeout) {
-        clearTimeout(this.killTimeout);
-        this.killTimeout = null;
-      }
-      if (!this.stoppedManually) {
-        this.onEnd();
-      }
-    });
-
-    cmd.on('close', () => {
-      if (this.killTimeout) {
-        clearTimeout(this.killTimeout);
-        this.killTimeout = null;
-      }
-      if (!this.stoppedManually && this.ffmpegCommand === cmd) {
-        this.ffmpegCommand = null;
-      }
+      if (!this.stoppedManually) this.onEnd();
     });
 
     this.ffmpegCommand = cmd;
     cmd.run();
-
     return cmd;
   }
 
-  captureFrame(streamUrl, options = {}) {
-    if (!streamUrl) {
-      throw new Error('流不可用: 缺少输入流地址');
-    }
+  async captureFrame(streamUrl, options = {}) {
+    if (!streamUrl) throw new Error('流地址不可用');
 
-    const timeout = options.timeout || 20000; // 默认 20 秒超时
-    const platform = options.platform || 'unknown';
-
+    const timeout = options.timeout || 20000;
     return new Promise((resolve, reject) => {
-      const cmd = FFmpeg(streamUrl);
-
-      // 设置输入选项 - 优化用于快速帧提取
-      const inputOptions = this.buildInputOptions(streamUrl);
-      // 添加用于快速获取帧的参数
-      inputOptions.push('-an');     // 禁用音频
-      inputOptions.push('-sn');     // 禁用字幕
-      cmd.inputOptions(inputOptions);
-
-      // 设置输出选项 - 针对平台优化
-      let outputOptions = [];
-      
-      if (platform === 'bilibili') {
-        // B站特定优化：更激进的关键帧提取，降低质量以减小文件大小
-        outputOptions = [
-          '-frames:v', '1',
-          '-f', 'image2pipe',
-          '-c:v', 'mjpeg',
-          '-q:v', '5',              // 降低质量，减小文件大小（避免 Telegram 413 错误）
-        ];
-      } else if (platform === 'douyu') {
-        // 斗鱼特定优化
-        outputOptions = [
-          '-frames:v', '1',
-          '-f', 'image2pipe',
-          '-c:v', 'mjpeg',
-          '-q:v', '5',
-        ];
-      } else {
-        // 默认参数
-        outputOptions = [
-          '-frames:v', '1',
-          '-f', 'image2pipe',
-          '-c:v', 'mjpeg',
-          '-q:v', '5',
-        ];
-      }
-
-      cmd.outputOptions(outputOptions);
-
       const chunks = [];
-      let settled = false;
-      let startTime = Date.now();
+      const cmd = FFmpeg(streamUrl)
+        .inputOptions([
+          '-ss', '0', 
+          '-analyzeduration', '1000000', 
+          '-probesize', '1000000',
+          ...this.buildInputOptions(streamUrl),
+          '-an', '-sn'
+        ])
+        .outputOptions([
+          '-frames:v', '1',
+          '-f', 'image2pipe',
+          '-c:v', 'mjpeg',
+          '-q:v', '5',
+          '-update', '1'
+        ]);
 
-      // 设置超时
       const timeoutHandle = setTimeout(() => {
-        const elapsed = Date.now() - startTime;
-        fail(new Error(`ffmpeg 截图超时: ${elapsed}ms 内未获取到帧数据 (平台: ${platform})`));
+        cmd.kill('SIGKILL');
+        reject(new Error(`截图超时 (${timeout}ms)`));
       }, timeout);
 
-      const fail = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutHandle);
-        try {
-          cmd.kill('SIGKILL');
-        } catch (e) {
-          // 忽略错误
-        }
-        reject(error);
-      };
-
-      const succeed = (buffer) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutHandle);
-        const elapsed = Date.now() - startTime;
-        resolve(buffer);
-      };
-
-      cmd.on('start', (commandLine) => {
-        console.log(`[FFmpegService] 截图命令已启动 (平台: ${platform}, 超时: ${timeout}ms)`);
-        // 从 FFmpeg 子进程的 stdout 捕获图像数据
-        const proc = cmd.ffmpegProc;
-        if (proc && proc.stdout) {
-          proc.stdout.on('data', (chunk) => {
-            chunks.push(Buffer.from(chunk));
-          });
-          proc.stdout.on('error', (err) => {
-            console.error(`[FFmpegService] 输出流错误: ${err.message}`);
-          });
-        }
-      });
-
-      cmd.on('error', (err) => {
-        console.error(`[FFmpegService] FFmpeg进程错误: ${err.message}`);
-        fail(new Error(`FFmpeg错误: ${err.message}`));
-      });
-
+      const ffStream = cmd.pipe();
+      ffStream.on('data', chunk => chunks.push(chunk));
+      
       cmd.on('end', () => {
-        const image = Buffer.concat(chunks);
-        if (!image.length) {
-          const elapsed = Date.now() - startTime;
-          console.warn(`[FFmpegService] 未获取到帧数据 (经过 ${elapsed}ms, 平台: ${platform})`);
-          fail(new Error('未获取到有效帧 - 可能是关键帧延迟或流不稳定'));
-          return;
-        }
-        const elapsed = Date.now() - startTime;
-        console.log(`[FFmpegService] 成功获取截图 - 大小: ${image.length} 字节 (耗时: ${elapsed}ms)`);
-        succeed(image);
+        clearTimeout(timeoutHandle);
+        const buffer = Buffer.concat(chunks);
+        buffer.length > 0 ? resolve(buffer) : reject(new Error('未捕获到帧数据'));
       });
 
-      // 输出到 stdout（pipe:1），通过 start 事件中的 proc.stdout 捕获
-      cmd.output('pipe:1');
-      cmd.run();
+      cmd.on('error', err => {
+        clearTimeout(timeoutHandle);
+        reject(err);
+      });
     });
   }
 
@@ -356,27 +224,36 @@ class FFmpegService {
       this.stoppedManually = true;
       const cmdRef = this.ffmpegCommand;
       this.ffmpegCommand = null;
-
-      // 先尝试优雅退出
       cmdRef.kill('SIGINT');
-
-      // 设置超时：5秒后若进程还未退出，强制 SIGKILL
-      if (this.killTimeout) {
-        clearTimeout(this.killTimeout);
-      }
+      
+      if (this.killTimeout) clearTimeout(this.killTimeout);
       this.killTimeout = setTimeout(() => {
-        console.log(`[FFmpegService] FFmpeg 进程未能响应 SIGINT，正在强制终止...`);
-        try {
-          cmdRef.kill('SIGKILL');
-        } catch (err) {
-          // 进程可能已退出，忽略错误
-        }
-        this.killTimeout = null;
+        try { cmdRef.kill('SIGKILL'); } catch(e) {}
       }, 5000);
-    } else if (this.killTimeout) {
-      clearTimeout(this.killTimeout);
-      this.killTimeout = null;
     }
+  }
+
+  parseProgressData(data) {
+    if (!data) return;
+    if (data.currentKbps) this.trafficStats.bitrateKbps = data.currentKbps;
+    if (data.targetSize) this.trafficStats.sessionBytes = data.targetSize * 1024;
+    this.trafficStats.updatedAt = new Date().toISOString();
+    this.onProgress(data);
+  }
+
+  parseStderrProgress(line) {
+    const bitrateMatch = line.match(/bitrate=\s*(\d+\.?\d*)\s*kbits?\/s/i);
+    if (bitrateMatch) {
+      this.trafficStats.bitrateKbps = parseFloat(bitrateMatch[1]);
+      this.trafficStats.updatedAt = new Date().toISOString();
+    }
+  }
+
+  getTrafficStats() {
+    return {
+      ...this.trafficStats,
+      running: !!this.ffmpegCommand && !this.stoppedManually,
+    };
   }
 }
 

@@ -494,6 +494,13 @@ function createStore(filePath = resolveDatabasePath()) {
     setSetting(key, value) {
       setSettingStmt.run(key, String(value));
     },
+
+    close() {
+      try {
+        database.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        database.close();
+      } catch {}
+    },
   };
 }
 

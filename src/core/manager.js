@@ -1,5 +1,5 @@
 const db = require('../db');
-const rooms = require('../rooms');
+const rooms = require('../platforms');
 const FFmpegService = require('../services/ffmpeg-service');
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36';
@@ -230,6 +230,14 @@ class StreamManager {
       running: ffmpegStats.running || false,
       lastRefreshAt: this.trafficStats.lastRefreshAt,
     };
+  }
+
+  enableStats() {
+    return this.ffmpeg.enableStats();
+  }
+
+  disableStats() {
+    return this.ffmpeg.disableStats();
   }
 
   // 保存本次会话统计到累计总量

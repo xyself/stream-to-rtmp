@@ -1,6 +1,6 @@
-const BilibiliRoom = require('./bilibili-room');
-const DouyuRoom = require('./douyu-room');
-const DouyinRoom = require('./douyin-room');
+const BilibiliRoom = require('./bilibili/room');
+const DouyuRoom = require('./douyu/room');
+const DouyinRoom = require('./douyin/room');
 
 const registry = {
   bilibili: BilibiliRoom,
@@ -16,7 +16,4 @@ function create(platform, roomId, options = {}) {
   return new RoomClass(roomId, options);
 }
 
-module.exports = {
-  create,
-  registry,
-};
+module.exports = { create, registry };
