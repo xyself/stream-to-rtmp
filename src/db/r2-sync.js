@@ -113,6 +113,10 @@ async function uploadRooms(db) {
   if (!isConfigured()) return false;
   try {
     const rooms = exportRooms(db);
+    if (rooms.length === 0) {
+      console.log('[R2] 跳过上传：本地无房间数据，避免覆盖 R2');
+      return false;
+    }
     const json = JSON.stringify(rooms, null, 2);
     await createClient().send(new PutObjectCommand({
       Bucket: process.env.R2_BUCKET,
