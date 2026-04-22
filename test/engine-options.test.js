@@ -3,8 +3,8 @@ const Module = require('node:module');
 const path = require('node:path');
 const { test } = require('node:test');
 
-const bilibiliEnginePath = path.resolve(__dirname, '../src/engines/bilibili.js');
-const douyuEnginePath = path.resolve(__dirname, '../src/engines/douyu.js');
+const bilibiliEnginePath = path.resolve(__dirname, '../src/platforms/bilibili/index.js');
+const douyuEnginePath = path.resolve(__dirname, '../src/platforms/douyu/index.js');
 
 function loadBilibiliEngine(axiosStub) {
   const originalLoad = Module._load;
@@ -22,7 +22,7 @@ function loadBilibiliEngine(axiosStub) {
   }
 }
 
-function loadDouyuEngine({ axiosStub, vmStub, cryptoStub }) {
+function loadDouyuEngine({ axiosStub, vmStub, cryptoStub, cryptoJsStub }) {
   const originalLoad = Module._load;
   delete require.cache[douyuEnginePath];
 
@@ -30,6 +30,7 @@ function loadDouyuEngine({ axiosStub, vmStub, cryptoStub }) {
     if (request === 'axios') return axiosStub;
     if (request === 'node:vm') return vmStub;
     if (request === 'node:crypto') return cryptoStub;
+    if (request === 'crypto-js') return cryptoJsStub;
     return originalLoad.apply(this, arguments);
   };
 
@@ -109,8 +110,8 @@ test('douyu engine consumes caller-provided headers for signature and play API r
       if (url.includes('homeH5Enc')) {
         return { data: { data: { room456: 'function ub98484234(){}' } } };
       }
-      if (url.includes('crypto-js')) {
-        return { data: 'crypto-js-code' };
+      if (url.includes('456')) {
+        return { data: { room: { owner_name: 'test', room_name: 'test', show_status: 1, videoLoop: 0 } } };
       }
       throw new Error(`unexpected url: ${url}`);
     },
@@ -146,7 +147,9 @@ test('douyu engine consumes caller-provided headers for signature and play API r
     },
   };
 
-  const engine = loadDouyuEngine({ axiosStub, vmStub, cryptoStub });
+  const cryptoJsStub = {};
+
+  const engine = loadDouyuEngine({ axiosStub, vmStub, cryptoStub, cryptoJsStub });
   const streamUrl = await engine.getStreamUrl('456', {
     headers: {
       'User-Agent': 'CallerDouyuUA/3.0',
