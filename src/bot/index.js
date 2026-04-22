@@ -241,7 +241,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   bot.callbackQuery('global_refresh_all', async (ctx) => {
     const tasks = db.getAllTasks().filter((t) => t.status === 'ENABLED');
-    for (const task of tasks) { await scheduler.refreshTask?.(task); }
+    await Promise.all(tasks.map((task) => scheduler.refreshTask?.(task)));
     await ctx.answerCallbackQuery(`已刷新 ${tasks.length} 个任务`);
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   });
