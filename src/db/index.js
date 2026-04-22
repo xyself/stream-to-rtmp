@@ -407,7 +407,33 @@ function createStore(filePath = resolveDatabasePath()) {
     }
   };
 
-  const addTargetTransaction = (taskId, targetUrl) => {
+
+  const addTargetsTransaction = (taskId, targetUrls) => {
+    try {
+      database.exec('BEGIN IMMEDIATE TRANSACTION');
+      const numericTaskId = Number(taskId);
+      const task = findTaskByIdStmt.get(numericTaskId);
+      if (!task) {
+        throw new Error(`任务不存在: ${taskId}`);
+      }
+
+      const results = [];
+      for (const targetUrl of targetUrls) {
+        const cleaned = typeof targetUrl === 'string' ? targetUrl.trim() : '';
+        if (cleaned) {
+          results.push(insertTarget(numericTaskId, cleaned));
+        }
+      }
+
+      database.exec('COMMIT');
+      return results;
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
+const addTargetTransaction = (taskId, targetUrl) => {
     try {
       database.exec('BEGIN IMMEDIATE TRANSACTION');
       const cleaned = typeof targetUrl === 'string' ? targetUrl.trim() : '';
@@ -437,6 +463,13 @@ function createStore(filePath = resolveDatabasePath()) {
 
     addTask(task) {
       const result = addTaskTransaction(task);
+      _onWrite?.();
+      return result;
+    },
+
+
+    addTargets(taskId, targetUrls) {
+      const result = addTargetsTransaction(taskId, targetUrls);
       _onWrite?.();
       return result;
     },
@@ -521,7 +554,7 @@ function createStore(filePath = resolveDatabasePath()) {
       try {
         database.exec('PRAGMA wal_checkpoint(TRUNCATE);');
         database.close();
-      } catch {}
+      } catch (err) { /* ignore */ }
     },
   };
 }

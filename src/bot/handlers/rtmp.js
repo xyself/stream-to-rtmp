@@ -27,7 +27,7 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
     const task = db.getAllTasks().find((item) => String(item.room_id) === roomId);
     if (!task) { await ctx.reply(`❌ 未找到房间 ${roomId} 对应的任务。`); return; }
     try {
-      for (const url of targetUrls) { db.addTarget(task.id, url); }
+      db.addTargets(task.id, targetUrls);
       await scheduler.tick?.();
       await ctx.reply(`✅ 已为房间 ${roomId} 增加 ${targetUrls.length} 条 RTMP/RTMPS。`);
     } catch (err) {
@@ -139,7 +139,7 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
       const task = db.getTaskById(addRtmpState.taskId);
       if (!task) { await ctx.reply('❌ 任务已不存在'); ctx.session.addRtmp = null; return; }
       try {
-        for (const url of urls) { db.addTarget(task.id, url); }
+        db.addTargets(task.id, urls);
         await scheduler.tick?.();
         const message = [
           '✅ 备用推流地址已添加',
