@@ -29,6 +29,8 @@ class FFmpegService {
     this.stoppedManually = false;
     this.streamUrl = null;
     this.killTimeout = null;
+    this.lastArgs = null;
+    this.stderrBuffer = [];
 
     this.trafficStats = {
       sessionBytes: 0,
@@ -48,6 +50,7 @@ class FFmpegService {
     if (streamUrl.startsWith('http')) {
       preInput.push(
         '-reconnect', '1',
+        '-reconnect_at_eof', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
         '-analyzeduration', '1000000',
@@ -115,10 +118,20 @@ class FFmpegService {
     }
 
     const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    this.lastArgs = [ffmpegPath, ...args];
     const proc = spawn(ffmpegPath, args);
+    this.stderrBuffer = [];
 
     proc.stderr.on('data', data => {
-      data.toString().split('\n').forEach(line => this.parseStderrProgress(line));
+      const text = data.toString();
+      text.split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (trimmed) {
+          this.parseStderrProgress(trimmed);
+          this.stderrBuffer.push(trimmed);
+          if (this.stderrBuffer.length > 10) this.stderrBuffer.shift();
+        }
+      });
     });
 
     proc.on('error', err => {
@@ -132,7 +145,9 @@ class FFmpegService {
       this.ffmpegCommand = null;
       if (this.stoppedManually) return;
       if (code !== 0 && code !== null) {
-        this.onError(new Error(`FFmpeg exited with code ${code}`));
+        const lastErrors = this.stderrBuffer.join('\n');
+        const errorMsg = `FFmpeg exited with code ${code}${lastErrors ? `:\n${lastErrors}` : ''}`;
+        this.onError(new Error(errorMsg));
       } else {
         this.onEnd();
       }
@@ -225,6 +240,7 @@ class FFmpegService {
   getTrafficStats() {
     return {
       ...this.trafficStats,
+      lastArgs: this.lastArgs,
       running: !!this.ffmpegCommand && !this.stoppedManually,
     };
   }

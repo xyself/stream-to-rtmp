@@ -116,6 +116,7 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
     `<b>🖥️服务器状态</b>`,
     `  CPU：[${system.cpuBar || '░░░░░░░░░░'}] ${system.cpuPercent ?? 0}%`,
     `  RAM：${escapeHtml(system.memUsed || '?')} / ${escapeHtml(system.memTotal || '?')}`,
+    `  SVC：服务占用 ${escapeHtml(system.serviceMem || '?')}`,
   ];
 
   if (system.dbSize) {
@@ -125,7 +126,8 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
   lines.push('');
   lines.push(`<b>📈 任务统计</b>`);
   lines.push(`  🏠 总计: ${stats.totalTasks ?? 0}  ｜  ✅ 运行: ${stats.enabledTasks ?? 0}  ｜  🛑 暂停: ${stats.disabledTasks ?? 0}`);
-  lines.push(`  ⚙️ FFmpeg: ${stats.runningManagers ?? 0} 个活跃进程`);
+  lines.push(`  ⚙️ FFmpeg: ${stats.activeStreams ?? 0} 个活跃推流`);
+  lines.push(`  🔍 监听任务: ${stats.totalMonitoring ?? 0} 个房间`);
   lines.push(`  📤 推流线路: ${stats.totalTargets ?? 0} 条`);
   lines.push(`  🎬 画质转码: ${system.transcodeVideo ? 'libx264 veryfast' : '关闭 (copy)'}`);
 
@@ -169,6 +171,39 @@ function renderRoomTraffic(tasks = []) {
   return lines.join('\n');
 }
 
+function renderDetailedStatus(tasks = []) {
+  if (tasks.length === 0) {
+    return '<b>🚀 健康监控</b>\n\n当前没有正在运行的任务';
+  }
+
+  const lines = ['<b>🚀 推流健康监控</b>', ''];
+
+  tasks.forEach((task, index) => {
+    const traffic = task.traffic || {};
+    const roomInfo = traffic.roomInfo || {};
+    const isRunning = traffic.running;
+    const kbps = Math.round(traffic.bitrateKbps || 0);
+    const duration = isRunning && traffic.startedAt 
+      ? formatUptime((Date.now() - new Date(traffic.startedAt).getTime()) / 1000)
+      : '未推流';
+    
+    const hostLine = roomInfo.hostName ? `\n  主播：${escapeHtml(roomInfo.hostName)}` : '';
+    const titleLine = roomInfo.roomName ? `\n  标题：${escapeHtml(roomInfo.roomName)}` : '';
+
+    lines.push(`<b>${index + 1}. ${escapeHtml(platformLabel(task.platform))} · #${escapeHtml(task.room_id)}</b>${hostLine}${titleLine}`);
+    lines.push(`  状态：${isRunning ? '🟢 正在推流' : '⚪ 待机/重试'}`);
+    lines.push(`  时长：${duration}`);
+    lines.push(`  码率：${kbps > 0 ? kbps + ' kbps' : '0 kbps'}`);
+    lines.push(`  错误：${traffic.errorCount || 0} 次`);
+    if (traffic.lastSuccessAt) {
+      lines.push(`  成功：${new Date(traffic.lastSuccessAt).toLocaleString('zh-CN', { hour12: false })}`);
+    }
+    lines.push('');
+  });
+
+  return lines.join('\n');
+}
+
 const NOTIFICATION_TYPES = [
   { key: 'notify_live_start',   label: '🟢 开播通知', desc: '主播开播时推送截图' },
   { key: 'notify_stream_ended', label: '🔴 关播通知', desc: '直播结束时推送' },
@@ -195,6 +230,26 @@ function renderNotificationSettings(settings = {}) {
   return lines.join('\n');
 }
 
+function renderFfmpegParams(tasks) {
+  const lines = ['<b>🛠️ FFmpeg 运行参数</b>\n'];
+  let count = 0;
+
+  tasks.forEach((task) => {
+    const traffic = task.traffic || {};
+    if (!traffic.running || !traffic.lastArgs) return;
+    
+    count++;
+    lines.push(`<b>${count}. ${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}</b>`);
+    lines.push(`<code>${escapeHtml(traffic.lastArgs.join(' '))}</code>\n`);
+  });
+
+  if (count === 0) {
+    return '当前没有正在运行的推流任务，无 FFmpeg 参数可查。';
+  }
+
+  return lines.join('\n');
+}
+
 module.exports = {
   platformLabel,
   escapeHtml,
@@ -203,6 +258,7 @@ module.exports = {
   renderTaskDetail,
   renderDashboard,
   renderRoomTraffic,
+  renderDetailedStatus,
   renderSystemStatus,
   formatBytes,
   maskTargetUrl,
@@ -211,4 +267,5 @@ module.exports = {
   formatUptime,
   renderNotificationSettings,
   NOTIFICATION_TYPES,
+  renderFfmpegParams,
 };

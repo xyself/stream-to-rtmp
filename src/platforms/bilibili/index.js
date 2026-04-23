@@ -31,6 +31,7 @@ class BilibiliEngine {
     const roomData = roomRes.data.data;
     const isLive = roomData.live_status === 1;
     const roomName = roomData.title || '';
+    const cover = isLive ? (roomData.keyframe || roomData.user_cover) : (roomData.user_cover || roomData.keyframe);
 
     let hostName = '';
     try {
@@ -43,7 +44,7 @@ class BilibiliEngine {
       }
     } catch {}
 
-    return { hostName, roomName, isLive, realId };
+    return { hostName, roomName, isLive, realId, cover };
   }
 
   async getStreamUrl(roomId, options = {}) {
@@ -76,6 +77,15 @@ class BilibiliEngine {
     } catch (err) {
       throw new Error(`B站解析失败: ${err.message}`);
     }
+  }
+
+  getOptions(roomId) {
+    return {
+      headers: {
+        'User-Agent': this.agent,
+        'Referer': `https://live.bilibili.com/${roomId}`,
+      },
+    };
   }
 }
 

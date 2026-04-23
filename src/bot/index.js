@@ -8,7 +8,7 @@ const { parseAllowedChatId, resetAllSessions } = require('./utils/parser');
 const roomHandlers = require('./handlers/room');
 const rtmpHandlers = require('./handlers/rtmp');
 const globalHandlers = require('./handlers/global');
-
+const statusHandlers = require('./handlers/status');
 
 async function safeEditMessageText(ctx, text, options) {
   try {
@@ -40,7 +40,9 @@ function buildMainKeyboard() {
   return new Keyboard()
     .text('📺 管理面板').text('🏠 房间管理').text('➕ 添加房间')
     .row()
-    .text('📈 流量查看').text('🔔 通知管理').text('❌ 取消操作')
+    .text('📊 推流状态').text('📈 流量查看').text('🔔 通知管理')
+    .row()
+    .text('🛠️ FFmpeg 参数').text('❌ 取消操作')
     .resized();
 }
 
@@ -102,16 +104,22 @@ function getSystemInfo() {
   const cpuPercent = Math.min(100, Math.round((loadAvg / cpuCount) * 100));
   const totalMem = os.totalmem();
   const usedMem = totalMem - os.freemem();
+  
+  // 服务自身内存占用 (RSS)
+  const serviceMem = views.formatBytes(process.memoryUsage().rss);
+
   let dbSize = null;
   try {
     const stat = fs.statSync(db.resolveDatabasePath());
     dbSize = views.formatBytes(stat.size);
   } catch { /* ignore */ }
+
   return {
     cpuPercent,
     cpuBar: views.progressBar(cpuPercent),
     memUsed: views.formatBytes(usedMem),
     memTotal: views.formatBytes(totalMem),
+    serviceMem,
     uptime: views.formatUptime(process.uptime()),
     dbSize,
     transcodeVideo: db.getSetting?.('transcode_video') === '1',
@@ -150,6 +158,7 @@ async function registerBotCommands(bot) {
   await bot.api.setMyCommands([
     { command: 'start', description: '打开直播转播控制中心' },
     { command: 'panel', description: '查看管理面板' },
+    { command: 'status', description: '查看推流健康状态' },
     { command: 'rooms', description: '查看房间列表' },
     { command: 'addroom', description: '添加新的直播房间' },
     { command: 'traffic', description: '查看房间流量统计' },
@@ -227,7 +236,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   });
 
   globalHandlers.register(bot, sharedDeps);
-
+  statusHandlers.register(bot, sharedDeps);
   roomHandlers.register(bot, sharedDeps);
   rtmpHandlers.register(bot, sharedDeps);
 

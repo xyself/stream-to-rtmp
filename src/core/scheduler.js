@@ -60,6 +60,10 @@ class Scheduler {
       if (!enabledKeys.has(taskKey)) {
         manager.stop();
         this.runningManagers.delete(taskKey);
+      } else {
+        if (typeof manager.checkHealth === 'function') {
+          manager.checkHealth();
+        }
       }
     }
 
@@ -68,7 +72,15 @@ class Scheduler {
       if (!this.runningManagers.has(taskKey)) {
         const manager = this.createManager(task);
         Promise.resolve(manager.start()).catch((err) => {
-          console.error(`[调度器] 任务 ${taskKey} 启动失败:`, err.message);
+          const msg = `任务启动失败: ${err.message}`;
+          if (manager.lastErrorMessage !== msg) {
+            manager.lastErrorMessage = msg;
+            this.onNotify?.({
+              taskId: task.id,
+              type: 'error',
+              message: msg,
+            });
+          }
         });
       }
     }
@@ -78,11 +90,18 @@ class Scheduler {
     const tasks = db.getAllTasks();
     const enabledTasks = tasks.filter((task) => task.status === 'ENABLED').length;
     const totalTargets = tasks.reduce((sum, task) => sum + ((Array.isArray(task.targets) && task.targets.length > 0) ? task.targets.length : 0), 0);
+    
+    let activeStreams = 0;
+    for (const manager of this.runningManagers.values()) {
+      if (manager.getTrafficStats?.().running) activeStreams++;
+    }
+
     return {
       totalTasks: tasks.length,
       enabledTasks,
       disabledTasks: tasks.length - enabledTasks,
-      runningManagers: this.runningManagers.size,
+      activeStreams,
+      totalMonitoring: this.runningManagers.size,
       totalTargets,
     };
   }
@@ -100,6 +119,16 @@ class Scheduler {
           };
       return { ...task, traffic };
     });
+  }
+
+  async refreshAllRoomInfo() {
+    const promises = [];
+    for (const manager of this.runningManagers.values()) {
+      if (typeof manager.refreshRoomInfo === 'function') {
+        promises.push(manager.refreshRoomInfo());
+      }
+    }
+    await Promise.all(promises);
   }
 
   enableAllStats() {
