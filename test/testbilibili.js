@@ -4,7 +4,7 @@ const { exec } = require('child_process');
 // ==========================================
 // 1. 配置区域
 // ==========================================
-const TEST_ROOM_ID = '13277770'; // 替换为你想测试的B站房间号
+const TEST_ROOM_ID = '894220'; // 替换为你想测试的B站房间号
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36';
 
