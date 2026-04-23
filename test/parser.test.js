@@ -6,11 +6,10 @@ const {
   resetAllSessions,
   ensureAddRoomState,
   resetAddRoomState,
+  SESSION_TIMEOUT_MS,
 } = require('../src/bot/utils/parser');
 
 test('session utilities', async (t) => {
-  const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
-
   await t.test('isSessionExpired', () => {
     // Missing startedAt
     assert.equal(isSessionExpired({}), false);
