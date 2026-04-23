@@ -9,13 +9,13 @@ services:
       NODE_ENV: production
       FFMPEG_PATH: /usr/bin/ffmpeg
       DATABASE_PATH: /app/data/data.db
-      PORT: 8000
+      PORT: 8080
     ports:
-      - "8000:8000"  # 健康检查端口
+      - "8080:8080"  # 健康检查端口
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
       interval: 30s
       timeout: 10s
       retries: 3

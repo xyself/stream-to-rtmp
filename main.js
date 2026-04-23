@@ -160,7 +160,7 @@ function createApp({
 
     // 只使用 PORT
 
-    const port = parseInt(process.env.PORT, 10) || 8000;
+    const port = parseInt(process.env.PORT, 10) || 8080;
 
 
 
@@ -196,19 +196,19 @@ function createApp({
 
       }
 
-      
+
 
       const stats = (typeof scheduler.getStats === 'function') ? scheduler.getStats() : { runningManagers: 0 };
 
       const trafficStats = (typeof scheduler.getTrafficStats === 'function') ? scheduler.getTrafficStats() : [];
 
-      
+
 
       // 计算总码率
 
       const totalBitrate = trafficStats.reduce((sum, task) => sum + (task.traffic?.bitrateKbps || 0), 0);
 
-      
+
 
       res.json({
         active: stats.activeStreams || 0,
@@ -254,7 +254,7 @@ function createApp({
 
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');
 
-    
+
 
     // PORT 有值才启动 Web 服务
 
@@ -266,7 +266,7 @@ function createApp({
 
       logger.log('📦 数据库服务：就绪');
 
-      
+
 
       // 设置 scheduler 的通知回调
 
@@ -284,7 +284,7 @@ function createApp({
 
       }
 
-      
+
 
       scheduler.start();
 
@@ -304,7 +304,7 @@ function createApp({
 
           uploadTimer = setTimeout(async () => {
 
-            try { await gistSync.uploadRooms(db); } catch {}
+            try { await gistSync.uploadRooms(db); } catch { }
 
           }, 30000);
 
@@ -360,7 +360,7 @@ function createApp({
                   parse_mode: 'HTML',
                   reply_markup: bot.buildMainKeyboard?.(),
                 });
-              } catch {}
+              } catch { }
             }
           }
 

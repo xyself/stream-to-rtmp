@@ -14,6 +14,6 @@ RUN mkdir -p /app/data
 
 ENV NODE_ENV=production \
     DATABASE_PATH=/app/data/data.db \
-    PORT=8000
+    PORT=8080
 
 CMD ["sh", "-c", "node scripts/restore.js && node main.js"]
