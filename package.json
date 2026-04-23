@@ -4,8 +4,7 @@
   "description": "Bilibili/Douyu live relay bot with Telegram control panel",
   "main": "main.js",
   "scripts": {
-    "start": "node main.js",
-    "test": "node --test test/*.js"
+    "start": "node main.js"
   },
   "engines": {
     "node": ">=25.0.0"
@@ -18,8 +17,5 @@
   },
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
-  "directories": {
-    "test": "test"
-  }
+  "type": "commonjs"
 }
