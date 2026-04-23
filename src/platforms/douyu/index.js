@@ -1,15 +1,8 @@
 const axios = require('axios');
-const vm = require('node:vm');
 const crypto = require('node:crypto');
+const Interpreter = require('js-interpreter');
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36';
-
-const CRYPTO_JS_CDNS = [
-  'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/3.1.9-1/crypto-js.min.js',
-  'https://cdn.jsdelivr.net/npm/crypto-js@3.1.9-1/crypto-js.min.js',
-  'https://cdn.staticfile.org/crypto-js/3.1.9-1/crypto-js.min.js',
-  'https://cdn.bootcdn.net/ajax/libs/crypto-js/3.1.9-1/crypto-js.min.js',
-];
 
 const ROOM_ID_PATTERNS = [
   /\$ROOM\.room_id\s*=\s*(\d+)/,
@@ -22,25 +15,17 @@ function buildHeaders(defaultHeaders = {}, overrideHeaders = {}) {
   return { ...defaultHeaders, ...overrideHeaders };
 }
 
-let cachedCryptoJS = null;
+function initMd5Func(interpreter, globalObject) {
+  const md5Wrapper = function(str) {
+    return crypto.createHash('md5').update(str).digest('hex');
+  };
+  interpreter.setProperty(globalObject, 'md5',
+      interpreter.createNativeFunction(md5Wrapper));
+}
 
 class DouyuEngine {
   constructor() {
     this.agent = DEFAULT_USER_AGENT;
-  }
-
-  async loadCryptoJS() {
-    if (cachedCryptoJS) return cachedCryptoJS;
-    for (const url of CRYPTO_JS_CDNS) {
-      try {
-        const res = await axios.get(url, { timeout: 5000 });
-        if (res.status === 200 && res.data) {
-          cachedCryptoJS = res.data;
-          return cachedCryptoJS;
-        }
-      } catch {}
-    }
-    throw new Error('无法加载 CryptoJS，请检查网络');
   }
 
   async fetchRoomID(roomId, requestHeaders) {
@@ -84,20 +69,30 @@ class DouyuEngine {
       const encRes = await axios.get(`https://www.douyu.com/swf_api/homeH5Enc?rids=${realId}`, { headers: requestHeaders });
       const jsCode = encRes.data.data[`room${realId}`];
 
-      const cryptoJsCode = await this.loadCryptoJS();
-      const sandbox = {
-        CryptoJS: null,
-        navigator: { userAgent: requestHeaders['User-Agent'] || this.agent },
-        window: {},
-        document: {},
-      };
-      const context = vm.createContext(sandbox);
-      vm.runInContext(cryptoJsCode, context);
-      vm.runInContext(jsCode, context);
+      // Stage 1: Safely evaluate the script to extract the decrypted ub98484234 function.
+      // We replace all instances of "return eval(strc)(...);" with "return strc;}" globally.
+      const modifiedCode = jsCode.replace(/return eval\(strc\)\(.*?\)[\s;]*}/g, 'return strc;}');
+
+      const script1 = modifiedCode + `\nub98484234();`;
+      const myInterpreter1 = new Interpreter(script1);
+      myInterpreter1.run();
+
+      const decrypted = myInterpreter1.value.toString();
+
+      // Stage 2: Execute the decrypted logic with our own md5
+      const modifiedDecrypted = decrypted.replace(/CryptoJS\.MD5\((.*?)\)\.toString\(\)/g, 'md5($1)');
 
       const did = crypto.randomBytes(16).toString('hex');
       const tt = Math.floor(Date.now() / 1000);
-      const signQuery = vm.runInContext(`ub98484234("${realId}", "${did}", ${tt})`, context);
+
+      const finalScript = `
+        var fn = ${modifiedDecrypted};
+        fn("${realId}", "${did}", ${tt});
+      `;
+
+      const myInterpreter2 = new Interpreter(finalScript, initMd5Func);
+      myInterpreter2.run();
+      const signQuery = myInterpreter2.value.toString();
 
       const apiRes = await axios.post(`https://www.douyu.com/lapi/live/getH5Play/${realId}`, signQuery, {
         headers: buildHeaders({
