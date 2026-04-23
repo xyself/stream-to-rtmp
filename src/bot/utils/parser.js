@@ -93,6 +93,7 @@ module.exports = {
   isNumericRoomId,
   parseLiveRoomInput,
   isValidRelayTargetUrl,
+  SESSION_TIMEOUT_MS,
   isSessionExpired,
   cleanExpiredSessions,
   resetAllSessions,
