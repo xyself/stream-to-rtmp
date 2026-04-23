@@ -139,7 +139,7 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
       const task = db.getTaskById(addRtmpState.taskId);
       if (!task) { await ctx.reply('❌ 任务已不存在'); ctx.session.addRtmp = null; return; }
       try {
-        for (const url of urls) { db.addTarget(task.id, url); }
+        db.addTargets(task.id, urls);
         await scheduler.tick?.();
         const message = [
           '✅ 备用推流地址已添加',
