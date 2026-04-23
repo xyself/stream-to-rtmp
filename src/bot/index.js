@@ -39,7 +39,7 @@ function buildMainKeyboard() {
   return new Keyboard()
     .text('📺 管理面板').text('🏠 房间管理').text('➕ 添加房间')
     .row()
-    .text('📈 流量查看').text('🔔 通知管理').text('❌ 取消操作')
+    .text('🔔 通知管理').text('📊 推流状态').text('🛠️ FFmpeg 参数')
     .resized();
 }
 
@@ -101,16 +101,22 @@ function getSystemInfo() {
   const cpuPercent = Math.min(100, Math.round((loadAvg / cpuCount) * 100));
   const totalMem = os.totalmem();
   const usedMem = totalMem - os.freemem();
+  
+  // 核心服务占用
+  const serviceMem = process.memoryUsage().rss;
+  
   let dbSize = null;
   try {
     const stat = fs.statSync(db.resolveDatabasePath());
     dbSize = views.formatBytes(stat.size);
   } catch {}
+  
   return {
     cpuPercent,
     cpuBar: views.progressBar(cpuPercent),
     memUsed: views.formatBytes(usedMem),
     memTotal: views.formatBytes(totalMem),
+    serviceMem: views.formatBytes(serviceMem),
     uptime: views.formatUptime(process.uptime()),
     dbSize,
     transcodeVideo: db.getSetting?.('transcode_video') === '1',
@@ -151,7 +157,8 @@ async function registerBotCommands(bot) {
     { command: 'panel', description: '查看管理面板' },
     { command: 'rooms', description: '查看房间列表' },
     { command: 'addroom', description: '添加新的直播房间' },
-    { command: 'traffic', description: '查看房间流量统计' },
+    { command: 'status', description: '推流健康监控面板' },
+    { command: 'notify', description: '管理通知设置' },
   ]);
 }
 
@@ -187,31 +194,72 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.reply(views.renderRoomTraffic(scheduler.getTrafficStats()), { parse_mode: 'HTML', reply_markup: mainKeyboard });
   };
 
+  const showStatus = async (ctx) => {
+    // 触发立即刷新房间信息，确保获取最新封面和标题
+    try {
+      await Promise.race([
+        scheduler.refreshAllRoomInfo(),
+        new Promise((resolve) => setTimeout(resolve, 3000)), // 最多等3秒
+      ]);
+    } catch (err) {}
+
+    const stats = scheduler.getTrafficStats();
+    if (stats.length === 0) {
+      return await ctx.reply('当前没有正在运行的任务');
+    }
+
+    for (const task of stats) {
+      const roomInfo = task.traffic?.roomInfo || {};
+      const statusText = views.renderDetailedStatus([task]);
+      
+      if (roomInfo.cover) {
+        // 添加时间戳防止 TG 缓存旧封面
+        const coverUrl = roomInfo.cover.includes('?') 
+          ? `${roomInfo.cover}&t=${Date.now()}` 
+          : `${roomInfo.cover}?t=${Date.now()}`;
+          
+        try {
+          await ctx.replyWithPhoto(coverUrl, {
+            caption: statusText,
+            parse_mode: 'HTML',
+          });
+          continue;
+        } catch (err) {
+          // 忽略发送失败
+        }
+      }
+      await ctx.reply(statusText, { parse_mode: 'HTML' });
+    }
+  };
+
   bot.use(createChatGuard());
   bot.use(session({ initial: () => ({ addRoom: { step: null, roomId: null, platform: null } }) }));
+
+  const showNotificationSettings = async (ctx) => {
+    const settings = getNotificationSettings();
+    await ctx.reply(views.renderNotificationSettings(settings), {
+      parse_mode: 'HTML',
+      reply_markup: buildNotificationKeyboard(settings),
+    });
+  };
 
   bot.command('start', async (ctx) => {
     resetAllSessions(ctx.session);
     await ctx.reply('🚀 直播转播控制中心', { reply_markup: mainKeyboard });
   });
   bot.command('panel', showDashboard);
+  bot.command('status', showStatus);
+  bot.command('notify', showNotificationSettings);
   bot.command('traffic', showTraffic);
 
   bot.hears('📺 管理面板', showDashboard);
-  bot.hears('📈 流量查看', showTraffic);
-
-  bot.hears('🔔 通知管理', async (ctx) => {
-    const settings = getNotificationSettings();
-    await ctx.reply(views.renderNotificationSettings(settings), {
-      parse_mode: 'HTML',
-      reply_markup: buildNotificationKeyboard(settings),
-    });
+  bot.hears('📊 推流状态', showStatus);
+  bot.hears('🛠️ FFmpeg 参数', async (ctx) => {
+    const stats = scheduler.getTrafficStats();
+    await ctx.reply(views.renderFfmpegParams(stats), { parse_mode: 'HTML' });
   });
+  bot.hears('🔔 通知管理', showNotificationSettings);
 
-  bot.hears('❌ 取消操作', async (ctx) => {
-    resetAllSessions(ctx.session);
-    await ctx.reply('✅ 已取消当前操作', { reply_markup: mainKeyboard });
-  });
 
   bot.callbackQuery(/^ntoggle:(.+)/, async (ctx) => {
     const key = ctx.match[1];

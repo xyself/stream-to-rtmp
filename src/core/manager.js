@@ -106,6 +106,10 @@ class StreamManager {
     this._pendingTimer = null;
     this._notifyTimer = null;
     this._streamStartedAt = null;
+    this.freezeCount = 0;
+    this.lastErrorMessage = null;
+    this.errorCount = 0;
+    this.lastSuccessAt = null;
 
     // 流量统计相关
     this.trafficStats = {
@@ -121,42 +125,41 @@ class StreamManager {
       inputHeaders: this.roomOptions.headers,
       globalOutputOptions: task.ffmpeg?.outputOptions || [],
       transcodeVideo: db.getSetting?.('transcode_video') === '1',
-      onStart: () => {
-        console.log(`[推流启动] 房间: ${this.task.room_id}`);
-        db.updateError(this.task.id, null);
-        this._streamStartedAt = Date.now();
+        onStart: () => {
+          db.updateError(this.task.id, null);
+          this._streamStartedAt = Date.now();
+          this.lastSuccessAt = new Date().toISOString();
 
-        const wasOffline = this.lastNotifyType === 'offline' || this.lastNotifyType === 'stream_ended';
-        this.lastNotifyType = null;
-
-        if (wasOffline) {
-          if (this._notifyTimer) clearTimeout(this._notifyTimer);
-          this._notifyTimer = setTimeout(async () => { // 等待 CDN 就绪再截图
-            this._notifyTimer = null;
-            if (this.isStopping || !this.ffmpeg.getTrafficStats().running) return;
-            let imageBuffer = null;
-            try {
-              imageBuffer = await this.captureSnapshot();
-            } catch (err) {
-              console.log(`[${this.task.room_id}] 开播截图失败: ${err.message}`);
-            }
+          const wasOffline = this.lastNotifyType === 'offline' || this.lastNotifyType === 'stream_ended';
+          
+          // 异步获取房间信息和截图
+          setTimeout(async () => {
+            if (this.isStopping || !this.ffmpeg?.getTrafficStats().running) return;
+            
+            // 始终尝试获取房间信息
             try {
               this.roomInfo = await this.room.getInfo();
-            } catch (err) {
-              console.log(`[${this.task.room_id}] 获取房间信息失败: ${err.message}`);
+            } catch (err) {}
+
+            if (wasOffline) {
+              let imageBuffer = null;
+              try {
+                imageBuffer = await this.captureSnapshot();
+              } catch (err) {}
+
+              const infoLine = this.roomInfo?.hostName
+                ? `\n👤 ${this.roomInfo.hostName}` + (this.roomInfo.roomName ? ` — ${this.roomInfo.roomName}` : '')
+                : '';
+
+              this.onNotify({
+                taskId: this.task.id,
+                type: 'live_start',
+                message: `🟢 开播了！正在推流中...${infoLine}`,
+                imageBuffer,
+              });
             }
-            const infoLine = this.roomInfo?.hostName
-              ? `\n👤 ${this.roomInfo.hostName}` + (this.roomInfo.roomName ? ` — ${this.roomInfo.roomName}` : '')
-              : '';
-            this.onNotify({
-              taskId: this.task.id,
-              type: 'live_start',
-              message: `🟢 开播了！正在推流中...${infoLine}`,
-              imageBuffer,
-            });
-          }, 8000);
-        }
-      },
+          }, 5000); // 5秒延迟，确保流稳定且封面已更新
+        },
       onError: (err) => {
         if (this.isStopping) return;
         this.handleFfmpegError(err.message);
@@ -199,10 +202,8 @@ class StreamManager {
       if (this.currentStreamUrl && this.ffmpeg && this.ffmpeg.getTrafficStats().running) {
         streamUrl = this.currentStreamUrl;
         source = 'running-stream';
-        console.log(`[${this.task.room_id}] 📸 使用当前运行中的流地址截图`);
       } else {
         // 否则获取最新的源流地址
-        console.log(`[${this.task.room_id}] 📸 获取最新源流地址用于截图`);
         streamUrl = await this.room.getStreamUrl();
         source = 'fresh-source';
       }
@@ -211,13 +212,11 @@ class StreamManager {
         throw new Error('无法获取有效的直播流地址');
       }
 
-      console.log(`[${this.task.room_id}] 📸 开始FFmpeg截图 (来源: ${source})`);
       return await this.ffmpeg.captureFrame(streamUrl, {
         platform: this.task.platform,
         timeout: 25000, // 25秒超时用于B站等特殊平台
       });
     } catch (err) {
-      console.error(`[${this.task.room_id}] 📸 截图失败:`, err.message);
       throw new Error(`流不可用: ${err.message}`);
     }
   }
@@ -238,7 +237,52 @@ class StreamManager {
       startedAt: ffmpegStats.startedAt,
       running: ffmpegStats.running || false,
       lastRefreshAt: this.trafficStats.lastRefreshAt,
+      errorCount: this.errorCount,
+      lastSuccessAt: this.lastSuccessAt,
+      roomInfo: this.roomInfo,
+      lastArgs: ffmpegStats.lastArgs,
     };
+  }
+
+  async refreshRoomInfo() {
+    try {
+      this.roomInfo = await this.room.getInfo();
+      return this.roomInfo;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  checkHealth() {
+    if (this.isStopping || !this.ffmpeg) return;
+    const stats = this.ffmpeg.getTrafficStats();
+    if (!stats.running) return;
+
+    // 如果流已经运行超过 2 分钟，且码率为 0，则增加冻结计数
+    const runtime = Date.now() - (this._streamStartedAt || 0);
+    if (runtime > 120000 && stats.bitrateKbps === 0) {
+      this.freezeCount += 1;
+      if (this.freezeCount >= 4) { // 连续 4 次 tick (约 2 分钟)
+        this.freezeCount = 0;
+        this.handleFfmpegError('检测到画面冻结 (Bitrate 0)，正在自动重启...');
+      }
+    } else {
+      this.freezeCount = 0;
+      if (runtime > 60000 && this.lastNotifyType !== 'running') {
+        this.lastNotifyType = 'running';
+        this.lastErrorMessage = null;
+      }
+    }
+
+    // 每 5 分钟强制检查一次平台侧的开播状态，防止主播下播但流未断开（某些平台的轮播机制）
+    if (!this._lastLiveCheckAt || Date.now() - this._lastLiveCheckAt > 300000) {
+      this._lastLiveCheckAt = Date.now();
+      this.room.getInfo().then(info => {
+        if (!info.isLive && this.ffmpeg?.getTrafficStats().running) {
+          this.handleStreamEnded(); // 触发正常下播逻辑
+        }
+      }).catch(() => {});
+    }
   }
 
   enableStats() {
@@ -254,7 +298,6 @@ class StreamManager {
     const ffmpegStats = this.ffmpeg.getTrafficStats();
     if (ffmpegStats.sessionBytes) {
       this.trafficStats.totalBytes += ffmpegStats.sessionBytes;
-      console.log(`[${this.task.room_id}] 📊 本次会话统计已保存 - 累计: ${this.formatBytes(this.trafficStats.totalBytes)}`);
     }
   }
 
@@ -267,6 +310,7 @@ class StreamManager {
   }
 
   handleRoomError(msg) {
+    this.errorCount += 1;
     this.saveSessionStats();
     this.stopStreaming();
     db.updateError(this.task.id, msg);
@@ -285,7 +329,7 @@ class StreamManager {
     if (isOffline) {
       if (this.lastNotifyType !== 'offline') {
         this.lastNotifyType = 'offline';
-        console.log(`[${this.task.room_id}] 📌 房间已下播 - 正在监测中，等待主播重新开播...`);
+        this.lastErrorMessage = null; // 重置错误消息，因为现在是下播状态
         const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
         this.onNotify({
           taskId: this.task.id,
@@ -294,9 +338,9 @@ class StreamManager {
         });
       }
     } else {
-      console.log(`[${this.task.room_id}] ⚠️ 遇到错误 - ${msg}`);
-      if (this.lastNotifyType !== 'error') {
+      if (this.lastNotifyType !== 'error' || this.lastErrorMessage !== msg) {
         this.lastNotifyType = 'error';
+        this.lastErrorMessage = msg;
         this.onNotify({
           taskId: this.task.id,
           type: 'error',
@@ -306,24 +350,25 @@ class StreamManager {
     }
 
     const delay = this.pollPolicy.nextDelay(msg);
-    if (!isOffline || this.lastNotifyType !== 'offline') {
-      console.log(`[${this.task.room_id}] 调度下次检查，延迟: ${delay / 1000}s (类型: ${errorType})`);
-    }
     this.retryPolicy.reset();
     this.scheduleStart(delay);
   }
 
   handleFfmpegError(msg) {
+    this.errorCount += 1;
     this.saveSessionStats();
     this.stopStreaming();
     db.updateError(this.task.id, msg);
 
-    console.log(`[${this.task.room_id}] ⚠️ FFmpeg 错误 - ${msg}`);
-    this.onNotify({
-      taskId: this.task.id,
-      type: 'ffmpeg_error',
-      message: `推流出错: ${msg}`,
-    });
+    if (this.lastNotifyType !== 'ffmpeg_error' || this.lastErrorMessage !== msg) {
+      this.lastNotifyType = 'ffmpeg_error';
+      this.lastErrorMessage = msg;
+      this.onNotify({
+        taskId: this.task.id,
+        type: 'ffmpeg_error',
+        message: `推流出错: ${msg}`,
+      });
+    }
 
     // 检测流 URL 过期错误（B站等平台的签名过期），立即重新获取新 URL
     const isUrlExpired = msg.includes('Error opening input file') ||
@@ -334,7 +379,6 @@ class StreamManager {
     let delay;
     if (isUrlExpired) {
       delay = 20000; // URL 过期：20 秒后重新获取新 URL
-      console.log(`[${this.task.room_id}] 🔄 流地址可能已过期，将在 ${delay / 1000}s 后重新获取...`);
       this.retryPolicy.reset(); // 重置重试计数
     } else {
       delay = this.retryPolicy.nextDelay();
@@ -350,7 +394,6 @@ class StreamManager {
 
     if (this.lastNotifyType !== 'stream_ended') {
       this.lastNotifyType = 'stream_ended';
-      console.log(`[${this.task.room_id}] 🔴 直播已结束 - 正在监测下一场直播...`);
       const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
       this.onNotify({
         taskId: this.task.id,

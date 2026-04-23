@@ -211,9 +211,8 @@ function createApp({
       
 
       res.json({
-
-        active: stats.runningManagers || 0,
-
+        active: stats.activeStreams || 0,
+        totalMonitoring: stats.totalMonitoring || 0,
         totalBitrate: Math.round(totalBitrate),
 
         tasks: trafficStats.map((task) => ({
@@ -228,6 +227,11 @@ function createApp({
 
           sessionBytes: task.traffic?.sessionBytes || 0,
 
+          errorCount: task.traffic?.errorCount || 0,
+
+          lastSuccessAt: task.traffic?.lastSuccessAt,
+          startedAt: task.traffic?.startedAt,
+          roomInfo: task.traffic?.roomInfo,
         })),
 
       });
@@ -347,6 +351,18 @@ function createApp({
           logger.log('------------------------------------');
 
           sendReady();
+
+          const chatIds = bot.parseAllowedChatId?.();
+          if (chatIds) {
+            for (const id of chatIds) {
+              try {
+                await bot.api.sendMessage(id, '🚀 <b>系统已重启，UI 已同步更新</b>', {
+                  parse_mode: 'HTML',
+                  reply_markup: bot.buildMainKeyboard?.(),
+                });
+              } catch {}
+            }
+          }
 
         },
 

@@ -1,93 +1,62 @@
-# stream-to-rtmp
+# StreamOps 🚀 - 多路直播转播系统
 
-通过 Telegram 机器人管理直播转推任务，将 Bilibili / 斗鱼 / 抖音直播自动拉取并推送到 YouTube 或任意 RTMP 目的地，支持单房间多路输出。
+基于 Node.js 和 FFmpeg 的自动化直播转播系统，支持从 Bilibili、斗鱼、抖音等平台实时抓取直播流并推送到 YouTube/RTMP 目标。通过 Telegram 机器人进行全功能远程控制，并配备现代化的 Web 监控面板。
 
-## 功能
+## ✨ 核心特性
 
-- Telegram 机器人全程控制，无需服务器面板
-- 支持 Bilibili、斗鱼、抖音平台
-- 单房间多路 RTMP 同时输出
-- 开播/断流/错误自动 Telegram 通知（去重，不轰炸）
-- 开播时自动截图发送
-- 未开播轮询（2 分钟）、断流自动重试（30 秒）
-- SQLite 持久化，支持 GitHub Gist 数据备份同步
-- Docker / 云平台可直接部署，资源占用低
+- 📱 **Telegram 全功能控制**：无需命令行，通过聊天机器人即可完成房间添加、任务启停、状态查询及参数微调。
+- 📊 **现代化 Web 面板**：实时监控各路推流的码率、运行时间、错误统计及主播信息。
+- 🛠️ **精细化资源监控**：实时查看服务器及本服务的 CPU/内存占用情况。
+- 🖼️ **图文监控**：推流启动时及查询状态时，自动抓取直播间实时关键帧/封面。
+- 🔄 **高可靠性**：支持断流自动重连、画面冻结检测重启、下播自动释放进程。
+- ☁️ **云端同步**：内置 Gist 同步功能，实现跨设备配置备份与恢复。
+- ⚙️ **灵活转码**：支持全量视频转码 (libx264) 或 极速拷贝模式 (copy)。
 
-## 环境要求
+## 🚀 快速开始
 
-- Node.js 25+
-- FFmpeg（容器内已内置）
-- Telegram Bot Token（[@BotFather](https://t.me/BotFather) 获取）
+### 1. 环境准备
+- Node.js 25.8.2+
+- FFmpeg (系统中已安装或通过 `.env` 指定路径)
+- 一个 Telegram Bot Token (通过 @BotFather 获取)
 
-## 环境变量
-
-复制 `.env.example` 为 `.env` 并填写：
-
-```env
-# 必填
-TG_TOKEN=your_bot_token
-TG_CHAT_ID=your_chat_id          # 支持逗号分隔多个 ID
-
-# 数据库路径（本地开发用此值；Docker 容器内由 Dockerfile 自动覆盖为 /app/data/data.db）
-DATABASE_PATH=./data/data.db
-
-# GitHub Gist 同步（可选，不填则跳过）
-GIST_TOKEN=github_pat_xxxxxxxx   # 需要 gist scope
-GIST_ID=abc123def456             # Gist URL 末尾的 ID
-
-# Web 面板（可选，不填则不启动）
-# PORT=8000
-
-# 自定义 FFmpeg 路径（可选）
-# FFMPEG_PATH=/usr/bin/ffmpeg
-```
-
-## 本地启动
-
+### 2. 安装
 ```bash
+git clone <repository-url>
+cd stream-to-rtmp
 npm install
-cp .env.example .env
-# 编辑 .env 填入必填项
-node main.js
 ```
 
-## Docker 部署
+### 3. 配置
+在根目录创建 `.env` 文件：
+```env
+TG_TOKEN=你的机器人Token
+TG_CHAT_ID=你的Telegram数字ID (多个用逗号分隔)
+FFMPEG_PATH=ffmpeg (或具体路径)
+DATABASE_PATH=./data/data.db
+GIST_TOKEN=你的GithubToken (可选)
+GIST_ID=你的GistID (可选)
+```
 
+### 4. 运行
 ```bash
-# 构建并启动
-docker compose up -d --build
-
-# 查看日志
-docker compose logs -f
+npm start
 ```
 
-数据库文件持久化在 `./data/data.db`，通过 `volumes: - ./data:/app/data` 挂载。
+## 🖥️ 管理入口
 
-## 云平台部署（Koyeb / Railway 等）
+- **Telegram Bot**: 发送 `/start` 调出控制中心。
+- **Web Dashboard**: 访问 `http://localhost:3000` 查看实时监控面板。
 
-1. 配置环境变量（参考上方列表）
-2. 挂载持久卷到 `/app/data`（否则重启数据丢失）
-3. 配置 Gist 同步变量，容器启动时自动从 Gist 恢复数据
+## 🛠️ 技术架构
 
-启动命令已内置：`node scripts/restore.js && node main.js`
+- **Runtime**: Node.js (grammY + Express)
+- **Database**: SQLite (通过 `src/db/` 管理)
+- **Engine**: 插件化设计，支持快速扩展新平台
+- **Streaming**: FFmpeg 子进程封装 (FFmpegService)
 
-## 使用说明
+## 📝 开发者指南
 
-1. 给机器人发送 `/start`
-2. 点击 **添加房间** → 输入平台、房间号、RTMP 地址
-3. 在 **房间管理** 里启停任务、追加多路 RTMP 或删除
-4. 在 **管理面板** 查看运行状态和实时码率
-5. 开播时机器人自动发送通知和截图
+详见 [AGENTS.md](AGENTS.md) 了解代码结构与开发规范。
 
-## 目录结构
-
-```
-main.js                  启动入口
-scripts/restore.js       容器启动前从 Gist 恢复数据
-src/
-  bot/                   Telegram 机器人与命令处理
-  core/                  调度器与推流状态机
-  db/                    SQLite 封装 + Gist 同步
-  engines/               平台 API（Bilibili / 斗鱼 / 抖音）
-  services/              FFmpeg 子进程封装
-```
+## 📜 许可证
+ISC

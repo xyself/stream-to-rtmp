@@ -20,7 +20,17 @@ class DouyinEngine {
     if (!roomMatch) throw new Error('未能匹配到房间信息，页面结构可能已变更');
 
     const [, , status, title] = roomMatch;
-    if (status === '4') throw new Error('主播已下播');
+    
+    // 提取主播昵称
+    const userMatch = html.match(/user\\":{.*?\\"nickname\\":\\"([^"]+)\\"/);
+    const hostName = userMatch ? userMatch[1].replace(/\\\\/g, '') : '';
+
+    // 提取封面图
+    const coverMatch = html.match(/cover\\":{.*?\\"url_list\\":\[\\"([^"]+)\\"/);
+    const cover = coverMatch ? coverMatch[1].replace(/\\\\u0026/g, '&').replace(/\\u0026/g, '&').replace(/\\\\/g, '') : '';
+
+    const isLive = status === '2';
+    if (!isLive) throw new Error('主播已下播');
 
     let m3u8 = null;
     const m3u8Match = html.match(/hls_pull_url_map\\":(\{.*?\})/);
@@ -35,13 +45,13 @@ class DouyinEngine {
       flv = flvMatch[1].replace(/\\"/g, '"').replace(/\\\\u0026/g, '&').replace(/\\u0026/g, '&').replace('http://', 'https://');
     }
 
-    return { title, flv, m3u8 };
+    return { title, hostName, cover, flv, m3u8, isLive };
   }
 
   async getInfo(roomId) {
     try {
-      const { title } = await this._fetchPageData(roomId);
-      return { hostName: '', roomName: title, isLive: true, realId: roomId };
+      const { title, hostName, cover, isLive } = await this._fetchPageData(roomId);
+      return { hostName, roomName: title, isLive, realId: roomId, cover };
     } catch (err) {
       throw new Error(`抖音解析失败: ${err.message}`);
     }
@@ -56,6 +66,15 @@ class DouyinEngine {
     } catch (err) {
       throw new Error(`抖音解析失败: ${err.message}`);
     }
+  }
+
+  getOptions(roomId) {
+    return {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Referer': `https://live.douyin.com/${roomId}`,
+      },
+    };
   }
 }
 

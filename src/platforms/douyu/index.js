@@ -63,6 +63,23 @@ class DouyuEngine {
     const requestHeaders = buildHeaders({ 'User-Agent': this.agent }, options.headers);
     const realId = await this.fetchRoomID(roomId, requestHeaders);
 
+    try {
+      // 优先使用 Open API 获取更全的信息
+      const openRes = await axios.get(`https://open.douyucdn.cn/api/RoomApi/room/${realId}`, { headers: requestHeaders });
+      if (openRes.data?.error === 0) {
+        const d = openRes.data.data;
+        return {
+          hostName: d.owner_name || '',
+          roomName: d.room_name || '',
+          isLive: d.room_status === '1',
+          realId,
+          cover: d.room_thumb || d.avatar || '',
+        };
+      }
+    } catch (err) {
+      // Open API 失败则尝试 fallback 到 betard
+    }
+
     const res = await axios.get(`https://www.douyu.com/betard/${realId}`, { headers: requestHeaders });
     const room = res.data?.room || {};
     return {
@@ -70,6 +87,7 @@ class DouyuEngine {
       roomName: room.room_name || '',
       isLive: room.show_status === 1 && room.videoLoop === 0,
       realId,
+      cover: room.room_src || '',
     };
   }
 
@@ -113,6 +131,15 @@ class DouyuEngine {
     } catch (err) {
       throw new Error(`斗鱼解析失败: ${err.message}`);
     }
+  }
+
+  getOptions(roomId) {
+    return {
+      headers: {
+        'User-Agent': this.agent,
+        'Referer': `https://www.douyu.com/${roomId}`,
+      },
+    };
   }
 }
 
