@@ -172,9 +172,6 @@ class StreamManager {
 
   async start() {
     this.isStopping = false;
-    if (this.lastNotifyType !== 'offline') {
-      console.log(`[${this.task.room_id}] 正在检查直播间状态...`);
-    }
 
     let streamUrl;
     try {
