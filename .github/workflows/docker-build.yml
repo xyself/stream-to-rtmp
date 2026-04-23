@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -37,7 +37,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=sha,prefix={{branch}}-
+            # 将前缀改为固定字符串 'sha-'，这样生成的标签就是 'sha-0a3c005'，它是合法的
+            type=sha,prefix=sha- 
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
