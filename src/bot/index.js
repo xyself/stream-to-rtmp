@@ -329,7 +329,7 @@ defaultBot.handleManagerNotification = function(notification) {
   if (!chatIds || !chatIds.size || typeof this.api?.sendMessage !== 'function') return;
 
   const sendToAll = async () => {
-    for (const chatId of chatIds) {
+    await Promise.all(Array.from(chatIds).map(async (chatId) => {
       try {
         if (type === 'live_start' && notification.imageBuffer) {
           await this.api.sendPhoto(chatId, new InputFile(notification.imageBuffer, `live_${task.room_id}.jpg`), { caption: text });
@@ -339,7 +339,7 @@ defaultBot.handleManagerNotification = function(notification) {
       } catch (err) {
         console.error(`发送 Telegram 通知失败 (chat: ${chatId}):`, err.message);
       }
-    }
+    }));
   };
 
   sendToAll();
