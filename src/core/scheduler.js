@@ -66,7 +66,6 @@ class Scheduler {
     for (const task of enabledTasks) {
       const taskKey = this.buildTaskKey(task);
       if (!this.runningManagers.has(taskKey)) {
-        console.log(`[调度器] 发现新任务: ${taskKey}，正在启动...`);
         const manager = this.createManager(task);
         Promise.resolve(manager.start()).catch((err) => {
           console.error(`[调度器] 任务 ${taskKey} 启动失败:`, err.message);
@@ -110,9 +109,6 @@ class Scheduler {
         if (manager.enableStats()) enabled++;
       }
     }
-    if (enabled > 0) {
-      console.log(`[Scheduler] 已为 ${enabled} 个任务启用流量统计`);
-    }
     return enabled;
   }
 
@@ -120,7 +116,6 @@ class Scheduler {
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), interval);
     this.tick();
-    console.log('🚀 自动化调度系统已启动');
   }
 
   setOnNotify(callback) {
