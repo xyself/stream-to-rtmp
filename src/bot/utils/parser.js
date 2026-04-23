@@ -49,7 +49,7 @@ function parseLiveRoomInput(input) {
 }
 
 function isValidRelayTargetUrl(value) {
-  return /^(rtmp|rtmps):\/\//i.test(value);
+  return /^(rtmp|rtmps):\/\//i.test(value) && !/\s/.test(value);
 }
 
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000;

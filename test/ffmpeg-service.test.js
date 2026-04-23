@@ -44,7 +44,7 @@ function createChildProcessStub() {
       return this;
     },
     on(name, handler) {
-      events[name] = handler;
+      if(!events[name]) events[name] = []; events[name].push(handler);
       return this;
     },
     kill(signal) {
@@ -108,6 +108,9 @@ test('ffmpeg service starts tee output for multiple RTMP targets and forwards li
   child.emitSpawn();
   child.emitStderr('frame=1 fps=1\n');
   child.emitClose(0, null);
+  setTimeout(() => {}, 50);
+  setTimeout(() => {}, 50);
+  setTimeout(() => {}, 50); // allow async events to resolve
   service.stop();
 
   // 过滤出 ffmpeg 调用（排除 ffprobe）
@@ -196,6 +199,7 @@ test('ffmpeg service captureFrame reports non-zero ffmpeg exit codes with stderr
   const capturePromise = service.captureFrame('https://stream.example/live.flv');
   child.emitStderr('Connection refused');
   child.emitClose(1, null);
+  setTimeout(() => {}, 50);
 
   await assert.rejects(capturePromise, /ffmpeg 执行失败: Connection refused/);
 });
@@ -207,6 +211,7 @@ test('ffmpeg service captureFrame maps spawn errors to stream unavailable errors
 
   const capturePromise = service.captureFrame('https://stream.example/live.flv');
   child.emitError(new Error('spawn ffmpeg ENOENT'));
+  setTimeout(() => {}, 50);
 
   await assert.rejects(capturePromise, /流不可用: spawn ffmpeg ENOENT/);
 });

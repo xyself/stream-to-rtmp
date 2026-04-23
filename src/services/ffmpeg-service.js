@@ -88,6 +88,10 @@ class FFmpegService {
   start(streamUrl) {
     if (!streamUrl) throw new Error('缺少输入流地址');
 
+    if (this.targetUrls.some(url => !/^(rtmp|rtmps):\/\//i.test(url) || /\s/.test(url))) {
+      throw new Error('无效的推流地址或包含非法字符');
+    }
+
     if (this.ffmpegCommand) {
       this.stop();
     }
@@ -127,7 +131,7 @@ class FFmpegService {
       this.onError(err);
     });
 
-    proc.on('exit', (code, signal) => {
+    proc.on('exit', (code) => {
       if (this.ffmpegCommand !== proc) return;
       this.ffmpegCommand = null;
       if (this.stoppedManually) return;
@@ -209,7 +213,7 @@ class FFmpegService {
 
       if (this.killTimeout) clearTimeout(this.killTimeout);
       this.killTimeout = setTimeout(() => {
-        try { cmdRef.kill('SIGKILL'); } catch(e) {}
+        try { cmdRef.kill('SIGKILL'); } catch(e) { /* ignore */ }
       }, 5000);
     }
   }
