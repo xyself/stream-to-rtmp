@@ -97,7 +97,6 @@ function seedContentCache(db) {
   const rooms = exportRooms(db);
   if (rooms.length > 0) {
     _lastUploadedContent = JSON.stringify(rooms, null, 2);
-    console.log(`[Gist] 缓存已初始化 (${rooms.length} 个房间)`);
   }
 }
 
@@ -106,12 +105,10 @@ async function uploadRooms(db) {
   try {
     const rooms = exportRooms(db);
     if (rooms.length === 0) {
-      console.log('[Gist] 跳过上传：本地无房间数据，避免覆盖 Gist');
       return false;
     }
     const content = JSON.stringify(rooms, null, 2);
     if (_lastUploadedContent === content) {
-      console.log('[Gist] ⏭️ 内容无变化，跳过上传');
       return true;
     }
     const res = await fetch(`${GIST_API}/${process.env.GIST_ID}`, {
@@ -121,17 +118,14 @@ async function uploadRooms(db) {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     _lastUploadedContent = content;
-    console.log(`[Gist] ✅ 已同步 ${rooms.length} 个房间到 Gist`);
     return true;
   } catch (err) {
-    console.error('[Gist] ❌ 上传失败:', err.message);
     return false;
   }
 }
 
 async function restoreRooms(localDbPath) {
   if (!isConfigured()) {
-    console.log('[Gist] 未配置，跳过恢复');
     return false;
   }
   try {
@@ -140,7 +134,6 @@ async function restoreRooms(localDbPath) {
     const data = await res.json();
     const file = data.files?.[FILE_NAME];
     if (!file) {
-      console.log('[Gist] Gist 中暂无 rooms.json，将使用空数据库');
       return false;
     }
     const rooms = JSON.parse(file.content);
@@ -148,10 +141,8 @@ async function restoreRooms(localDbPath) {
     const database = new DatabaseSync(localDbPath);
     importRoomsIntoDb(database, rooms);
     database.close();
-    console.log(`[Gist] ✅ 已从 Gist 恢复 ${rooms.length} 个房间`);
     return true;
   } catch (err) {
-    console.error('[Gist] ❌ 恢复失败:', err.message);
     return false;
   }
 }
