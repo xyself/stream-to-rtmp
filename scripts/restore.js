@@ -61,8 +61,6 @@ async function main() {
     console.log('[seed] DB 为空，尝试从 rooms.json 种子文件导入...');
     seedFromFile(dbPath);
   }
-
-  process.exit(0);
 }
 
 main();
