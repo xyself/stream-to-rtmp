@@ -1,6 +1,7 @@
 services:
   stream-to-rtmp:
     build: .
+    image: stream-to-rtmp:latest
     container_name: stream-to-rtmp
     restart: unless-stopped
     env_file:
