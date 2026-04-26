@@ -125,7 +125,7 @@ class StreamManager {
       inputHeaders: this.roomOptions.headers,
       globalOutputOptions: task.ffmpeg?.outputOptions || [],
       transcodeVideo: db.getSetting?.('transcode_video') === '1',
-        onStart: () => {
+      onStart: () => {
           db.updateError(this.task.id, null);
           this._streamStartedAt = Date.now();
           this.lastSuccessAt = new Date().toISOString();
@@ -139,13 +139,17 @@ class StreamManager {
             // 始终尝试获取房间信息
             try {
               this.roomInfo = await this.room.getInfo();
-            } catch (err) {}
+            } catch (err) {
+              console.error(`[${this.task.room_id}] 获取房间信息失败:`, err.message);
+            }
 
             if (wasOffline) {
               let imageBuffer = null;
               try {
                 imageBuffer = await this.captureSnapshot();
-              } catch (err) {}
+              } catch (err) {
+                console.error(`[${this.task.room_id}] 截图失败:`, err.message);
+              }
 
               const infoLine = this.roomInfo?.hostName
                 ? `\n👤 ${this.roomInfo.hostName}` + (this.roomInfo.roomName ? ` — ${this.roomInfo.roomName}` : '')
@@ -281,7 +285,9 @@ class StreamManager {
         if (!info.isLive && this.ffmpeg?.getTrafficStats().running) {
           this.handleStreamEnded(); // 触发正常下播逻辑
         }
-      }).catch(() => {});
+      }).catch((err) => {
+        console.error(`[${this.task.room_id}] 平台状态检查失败:`, err.message);
+      });
     }
   }
 

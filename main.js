@@ -6,15 +6,9 @@ const express = require('express');
 
 const { renderDashboard } = require('./src/web/dashboard');
 
-
-
 // 使用系统 FFmpeg，或通过 FFMPEG_PATH 环境变量指定自定义路径
 
 if (process.env.FFMPEG_PATH) {
-
-  const FFmpeg = require('fluent-ffmpeg');
-
-  FFmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
 
   console.log('🔧 使用自定义 FFmpeg:', process.env.FFMPEG_PATH);
 
@@ -23,7 +17,6 @@ if (process.env.FFMPEG_PATH) {
   console.log('🔧 使用系统 FFmpeg');
 
 }
-
 
 
 const defaultDb = require('./src/db');
@@ -129,6 +122,8 @@ function createApp({
       logger.log('✅ 机器人已安全下线');
 
     } catch (err) {
+
+      logger.error('❌ 机器人停止失败:', err.message);
 
     }
 
@@ -304,7 +299,7 @@ function createApp({
 
           uploadTimer = setTimeout(async () => {
 
-            try { await gistSync.uploadRooms(db); } catch { }
+            try { await gistSync.uploadRooms(db); } catch (err) { logger.error('Gist 上传失败:', err.message); }
 
           }, 30000);
 
@@ -332,7 +327,7 @@ function createApp({
 
       } catch (err) {
 
-        logger.error('⚠️ 注册 Telegram Bot 命令失败，继续启动机器人:', err);
+        logger.error('⚠️ 注册 Telegram Bot 命令失败，继续启动机器人:', err.message);
 
       }
 
@@ -360,7 +355,9 @@ function createApp({
                   parse_mode: 'HTML',
                   reply_markup: bot.buildMainKeyboard?.(),
                 });
-              } catch { }
+              } catch (err) {
+                logger.error(`发送重启通知失败 (chatId: ${id}):`, err.message);
+              }
             }
           }
 

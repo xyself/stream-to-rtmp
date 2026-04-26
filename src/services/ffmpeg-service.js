@@ -164,29 +164,29 @@ class FFmpegService {
     return new Promise((resolve, reject) => {
       const chunks = [];
 
-      const inputOpts = [
+      const preInput = [
         '-loglevel', 'error',
         '-nostdin',
         '-ss', '0',
         '-analyzeduration', '1000000',
         '-probesize', '1000000',
-        '-an', '-sn',
       ];
 
       const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
       if (headerEntries.length > 0) {
         const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
-        inputOpts.push('-headers', headerString);
+        preInput.push('-headers', headerString);
       }
 
       const outputOpts = [
+        '-an', '-sn',
         '-frames:v', '1',
         '-f', 'image2pipe',
         '-c:v', 'mjpeg',
         '-q:v', '5',
       ];
 
-      const args = ['-i', streamUrl, ...inputOpts, ...outputOpts, '-'];
+      const args = [...preInput, '-i', streamUrl, ...outputOpts, '-'];
       const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
       const proc = spawn(ffmpegPath, args);
 
