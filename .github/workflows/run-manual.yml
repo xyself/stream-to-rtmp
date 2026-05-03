@@ -1,0 +1,44 @@
+name: Run Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      traceId:
+        required: true
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 删除运行记录
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          keep_minimum_runs: 3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ✅ 加这一段（核心）
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - run: npm install
+
+      - run: mkdir -p data
+
+      # ✅ 可选：验证 ffmpeg 是否可用（强烈建议加一次）
+      - run: ffmpeg -version
+
+      - run: |
+          node scripts/restore.js
+          node main.js
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
