@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 25
 
       # ✅ 加这一段（核心）
       - name: Install FFmpeg
@@ -34,14 +34,23 @@ jobs:
       - run: npm install
 
       - run: mkdir -p data
+      - run: mkdir -p logs
 
       # ✅ 可选：验证 ffmpeg 是否可用（强烈建议加一次）
       - run: ffmpeg -version
 
-      - name: Run Application
-        run: node scripts/restore.js && node main.js
+      # 全局安装 PM2
+      - run: npm install -g pm2
+
+      # 使用 PM2 启动应用（会自动执行 restore.js）
+      - name: Start with PM2
+        run: pm2 start ecosystem.config.js
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+
+      # 实时查看日志
+      - name: Monitor logs
+        run: pm2 logs stream-to-rtmp --lines 100
