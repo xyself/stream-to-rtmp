@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 25
 
       # ✅ 加这一段（核心）
       - name: Install FFmpeg
@@ -34,12 +34,14 @@ jobs:
       - run: npm install
 
       - run: mkdir -p data
+      - run: mkdir -p logs
 
       # ✅ 可选：验证 ffmpeg 是否可用（强烈建议加一次）
       - run: ffmpeg -version
 
+      # 直接运行 main.js（已集成 restoreOnce）
       - name: Run Application
-        run: node scripts/restore.js && node main.js
+        run: node main.js
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
