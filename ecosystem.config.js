@@ -1,7 +1,7 @@
 module.exports = {
   apps: [{
     name: 'stream-to-rtmp',
-    script: './scripts/start-with-restore.js',
+    script: './main.js',
     instances: 1,
     exec_mode: 'fork',
     interpreter: 'node',

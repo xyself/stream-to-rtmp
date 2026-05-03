@@ -6,6 +6,8 @@ const express = require('express');
 
 const { renderDashboard } = require('./src/web/dashboard');
 
+const { restoreOnce } = require('./src/init/restore');
+
 // 使用系统 FFmpeg，或通过 FFMPEG_PATH 环境变量指定自定义路径
 
 if (process.env.FFMPEG_PATH) {
@@ -246,6 +248,8 @@ function createApp({
 
 
   async function bootstrap() {
+    
+    await restoreOnce();
 
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');
 
