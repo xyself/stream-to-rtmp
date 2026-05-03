@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   build-check:
     runs-on: ubuntu-latest
@@ -30,3 +34,4 @@ jobs:
           token: ${{ github.token }}
           delete_workflow_pattern: "ci.yml"
           keep_minimum_runs: 2
+          retain_days: 1

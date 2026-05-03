@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  actions: write
+  contents: read
+
 env:
   REGISTRY: docker.io
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/stream-to-rtmp
@@ -56,3 +60,4 @@ jobs:
           token: ${{ github.token }}
           delete_workflow_pattern: "docker-build.yml"
           keep_minimum_runs: 2
+          retain_days: 1
