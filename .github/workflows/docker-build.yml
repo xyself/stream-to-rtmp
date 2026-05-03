@@ -49,3 +49,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: 删除运行记录
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          delete_workflow_pattern: "docker-build.yml"
+          keep_minimum_runs: 2

@@ -31,3 +31,9 @@ updates:
       - "ci"
     commit-message:
       prefix: "chore(ci):"
+  - name: 删除运行记录
+    uses: Mattraks/delete-workflow-runs@main
+    with:
+      token: ${{ github.token }}
+      delete_workflow_pattern: "dependabot.yaml"
+      keep_minimum_runs: 2

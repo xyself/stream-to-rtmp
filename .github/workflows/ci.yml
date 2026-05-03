@@ -23,3 +23,10 @@ jobs:
       - name: Syntax check
         run: |
           find . -name "*.js" -not -path "./node_modules/*" -exec node --check {} +
+          
+      - name: 删除运行记录
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          delete_workflow_pattern: "ci.yml"
+          keep_minimum_runs: 2
