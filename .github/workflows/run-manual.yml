@@ -23,7 +23,7 @@ jobs:
           keep_minimum_runs: 2
           retain_days: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
 
