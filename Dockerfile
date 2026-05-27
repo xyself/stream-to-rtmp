@@ -1,4 +1,4 @@
-FROM node:25-alpine
+FROM node:26-alpine
 
 # 安装 FFmpeg（Alpine 使用 apk）
 RUN apk add --no-cache ffmpeg
