@@ -47,25 +47,7 @@ function createApp({
 
   let shuttingDown = false;
 
-  let readySent = false;
-
   let server = null; // 合并为一个 server 实例
-
-
-
-  function sendReady() {
-
-    if (readySent) return;
-
-    readySent = true;
-
-    if (typeof processRef.send === 'function') {
-
-      processRef.send('ready');
-
-    }
-
-  }
 
 
 
@@ -348,8 +330,6 @@ function createApp({
           logger.log(`🤖 机器人 @${info.username} 已上线`);
 
           logger.log('------------------------------------');
-
-          sendReady();
 
           const chatIds = bot.parseAllowedChatId?.();
           if (chatIds) {
