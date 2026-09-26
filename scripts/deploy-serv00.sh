@@ -7,7 +7,7 @@
 # 做的事情：
 #   1. 检查 node / ffmpeg / git 是否存在
 #   2. 克隆或更新代码，安装依赖
-#   3. 生成 .env 并交互式填写关键项（TG_TOKEN / TG_CHAT_ID / LOW_MEMORY）
+#   3. 生成 .env 并交互式填写全部配置项（必填 + 可选，PORT 填了才追问面板相关）
 #   4. 如配了 Gist 且本地无数据库，自动从 Gist 恢复房间列表
 #   5. 以低内存参数启动（NODE_OPTIONS=--max-old-space-size=256）
 #   6. 安装 cron 看门：每 5 分钟检查一次，进程死了自动拉起
@@ -53,9 +53,10 @@ fi
 [ -f .env ] || { log ">> 从模板生成 .env"; cp .env.example .env; }
 
 # 交互式填写：已填则跳过（不用 sed -i，FreeBSD/Linux 通用）
+get_val() { grep -E "^$1=" .env | cut -d= -f2-; }
 prompt_if_empty() {
   key="$1"; prompt="$2"; def="$3"
-  val="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+  val="$(get_val "$key")"
   if [ -z "$val" ]; then
     printf '%s' "$prompt"
     [ -n "$def" ] && printf ' [%s]' "$def"
@@ -68,12 +69,22 @@ prompt_if_empty() {
     mv "$tmpfile" .env
   fi
 }
-prompt_if_empty "TG_TOKEN" "Telegram Bot Token" ""
-prompt_if_empty "TG_CHAT_ID" "Telegram 数字 ID（必填）" ""
+log ">> 填写配置（标'可选'的直接回车跳过）"
+prompt_if_empty "TG_TOKEN" "Telegram Bot Token（必填）" ""
+prompt_if_empty "TG_CHAT_ID" "Telegram 数字 ID（必填，多个逗号分隔）" ""
 prompt_if_empty "LOW_MEMORY" "低内存模式 1=开 0=关" "1"
+prompt_if_empty "GIST_TOKEN" "Gist Token（可选，用于同步房间配置）" ""
+prompt_if_empty "GIST_ID" "Gist ID（可选）" ""
+prompt_if_empty "FFMPEG_PATH" "ffmpeg 路径（可选，默认用系统 PATH）" ""
+prompt_if_empty "DATABASE_PATH" "数据库路径" "./data/data.db"
+prompt_if_empty "PORT" "Web 面板端口（可选，回车=不启动面板）" ""
+if [ -n "$(get_val PORT)" ]; then
+  prompt_if_empty "BIND_HOST" "面板监听地址" "127.0.0.1"
+  prompt_if_empty "DASHBOARD_TOKEN" "面板访问令牌（建议设置）" ""
+fi
 
-[ -n "$(grep -E '^TG_TOKEN=' .env | cut -d= -f2-)" ] || die "TG_TOKEN 为空，先填好 .env 再跑"
-[ -n "$(grep -E '^TG_CHAT_ID=' .env | cut -d= -f2-)" ] || die "TG_CHAT_ID 为空（必填），先填好 .env 再跑"
+[ -n "$(get_val TG_TOKEN)" ] || die "TG_TOKEN 为空，先填好 .env 再跑"
+[ -n "$(get_val TG_CHAT_ID)" ] || die "TG_CHAT_ID 为空（必填），先填好 .env 再跑"
 
 # ---------- 4. Gist 恢复（可选） ----------
 if grep -qE '^GIST_TOKEN=.+' .env && grep -qE '^GIST_ID=.+' .env && [ ! -f data/data.db ]; then
