@@ -40,7 +40,6 @@ GIST_ID=你的GistID (可选)
 # DASHBOARD_TOKEN=访问面板需要的 token
 # LOW_MEMORY=1
 ```
-
 ### 🔒 安全说明
 
 - `TG_CHAT_ID` 为必填项：未配置时程序拒绝启动，防止机器人被陌生人操控。

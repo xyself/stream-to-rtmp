@@ -6,7 +6,7 @@ const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 const NOT_LIVE_MESSAGE = '主播尚未开播';
 const STREAM_ENDED_MESSAGE = 'STREAM_ENDED';
 
-// 低内存模式（512MB 级小内存主机）：强制关闭转码与截图，避免 OOM
+// 低内存模式（512MB 级小内存主机）：强制关闭视频转码，只用 copy
 const LOW_MEMORY = process.env.LOW_MEMORY === '1';
 
 function resolveTargetUrls(task) {
@@ -201,9 +201,6 @@ class StreamManager {
   }
 
   async captureSnapshot() {
-    if (LOW_MEMORY) {
-      throw new Error('低内存模式已禁用截图');
-    }
     try {
       let streamUrl = null;
       let source = 'fresh-source';
