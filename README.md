@@ -14,6 +14,15 @@
 1
 ## 🚀 快速开始
 
+### serv00 / 小内存主机一键部署
+
+```bash
+git clone https://github.com/xyself/stream-to-rtmp.git ~/apps/stream-to-rtmp
+bash ~/apps/stream-to-rtmp/scripts/deploy-serv00.sh
+```
+
+脚本会自动：检查环境 → 拉代码装依赖 → 交互式填写 `.env` → 从 Gist 恢复（可选）→ 以低内存参数启动 → 安装 cron 看门（每 5 分钟，进程死了自动拉起）。以后更新代码重跑一遍脚本即可。
+
 ### 1. 环境准备
 - Node.js 25.8.2+
 - FFmpeg (系统中已安装或通过 `.env` 指定路径)
