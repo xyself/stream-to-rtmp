@@ -9,13 +9,13 @@
 #   2. 克隆或更新代码，安装依赖
 #   3. 生成 .env 并交互式填写全部配置项（必填 + 可选，PORT 填了才追问面板相关）
 #   4. 如配了 Gist 且本地无数据库，自动从 Gist 恢复房间列表
-#   5. 以限制内存参数启动（NODE_OPTIONS=--max-old-space-size=512）
+#   5. 以限制内存参数启动（NODE_OPTIONS=--max-old-space-size=256）
 #   6. 安装 cron 看门：每 5 分钟检查一次，进程死了自动拉起
 set -e
 
 APP_DIR="$HOME/apps/stream-to-rtmp"
 REPO_URL="https://github.com/xyself/stream-to-rtmp.git"
-NODE_OPTS="--max-old-space-size=512"
+NODE_OPTS="--max-old-space-size=256"
 PROC_PATTERN="stream-to-rtmp/main.js"
 WATCHDOG_MARK="# stream-to-rtmp-watchdog"
 
