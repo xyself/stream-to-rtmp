@@ -55,7 +55,7 @@ graph TD
 1. 在 `src/platforms/` 创建子目录。
 2. 实现 `getInfo(roomId)`：返回 `{ hostName, roomName, isLive, cover }`。
 3. 实现 `getStreamUrl(roomId)`：返回可用流地址。
-4. 在 `src/rooms/index.js` (或对应工厂类) 中注册。
+4. 在 `src/platforms/index.js` 的注册表中注册。
 
 ---
 

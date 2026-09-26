@@ -234,6 +234,12 @@ class FFmpegService {
       this.trafficStats.bitrateKbps = parseFloat(bitrateMatch[1]);
       this.trafficStats.updatedAt = new Date().toISOString();
     }
+    // 解析累计输出字节：ffmpeg -stats 行形如 "size=    1234KiB"
+    const sizeMatch = line.match(/size=\s*(\d+)KiB/i);
+    if (sizeMatch) {
+      this.trafficStats.sessionBytes = parseInt(sizeMatch[1], 10) * 1024;
+      this.trafficStats.updatedAt = new Date().toISOString();
+    }
   }
 
   getTrafficStats() {

@@ -30,12 +30,22 @@ npm install
 在根目录创建 `.env` 文件：
 ```env
 TG_TOKEN=你的机器人Token
-TG_CHAT_ID=你的Telegram数字ID (多个用逗号分隔)
+TG_CHAT_ID=你的Telegram数字ID (多个用逗号分隔，必填，为空时程序拒绝启动)
 FFMPEG_PATH=ffmpeg (或具体路径)
 DATABASE_PATH=./data/data.db
 GIST_TOKEN=你的GithubToken (可选)
 GIST_ID=你的GistID (可选)
+# 可选：面板监听地址（默认 127.0.0.1）、面板访问令牌、低内存模式（512MB 主机建议开启）
+# BIND_HOST=127.0.0.1
+# DASHBOARD_TOKEN=访问面板需要的 token
+# LOW_MEMORY=1
 ```
+
+### 🔒 安全说明
+
+- `TG_CHAT_ID` 为必填项：未配置时程序拒绝启动，防止机器人被陌生人操控。
+- Web 面板默认只监听 `127.0.0.1`；如需对外访问请配置 `DASHBOARD_TOKEN`，访问时需携带 `?token=xxx`。
+- 所有展示推流地址的地方（面板、Bot 的"FFmpeg 参数"）均已脱敏，只显示 `scheme://host/****`。
 
 ### 4. 运行
 ```bash

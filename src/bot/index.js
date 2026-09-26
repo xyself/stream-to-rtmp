@@ -5,6 +5,7 @@ const db = require('../db');
 const scheduler = require('../core/scheduler');
 const views = require('./views');
 const { parseAllowedChatId, resetAllSessions } = require('./utils/parser');
+const { isLowMemoryMode } = require('../core/manager');
 const roomHandlers = require('./handlers/room');
 const rtmpHandlers = require('./handlers/rtmp');
 const gistSync = require('../db/gist-sync');
@@ -44,17 +45,22 @@ function buildMainKeyboard() {
 }
 
 function buildDashboardKeyboard() {
-  const transcodeOn = db.getSetting?.('transcode_video') === '1';
-  return new InlineKeyboard()
+  const transcodeOn = !isLowMemoryMode() && db.getSetting?.('transcode_video') === '1';
+  const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
     .text('🛑 全部暂停', 'global_disable_all')
     .row()
     .text('🔄 刷新全部', 'global_refresh_all')
     .text('🧹 清理重启', 'global_clean_restart')
-    .row()
-    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode')
-    .row()
-    .text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
+    .row();
+  if (isLowMemoryMode()) {
+    // 低内存模式：转码被强制关闭，按钮仅作提示
+    keyboard.text('🎬 画质转码: ⚪ 关闭 (低内存模式)', 'noop_lowmem').row();
+  } else {
+    keyboard.text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row();
+  }
+  keyboard.text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
+  return keyboard;
 }
 
 function buildTaskListKeyboard(tasks) {
@@ -119,7 +125,8 @@ function getSystemInfo() {
     serviceMem: views.formatBytes(serviceMem),
     uptime: views.formatUptime(process.uptime()),
     dbSize,
-    transcodeVideo: db.getSetting?.('transcode_video') === '1',
+    transcodeVideo: !isLowMemoryMode() && db.getSetting?.('transcode_video') === '1',
+    lowMemoryMode: isLowMemoryMode(),
   };
 }
 
@@ -335,7 +342,15 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.reply(ok ? '📥 已从 Gist 恢复，任务已重启' : '❌ 恢复失败，请检查日志');
   });
 
+  bot.callbackQuery('noop_lowmem', async (ctx) => {
+    await ctx.answerCallbackQuery('低内存模式下转码已被强制关闭，不可开启');
+  });
+
   bot.callbackQuery('global_toggle_transcode', async (ctx) => {
+    if (isLowMemoryMode()) {
+      await ctx.answerCallbackQuery('低内存模式下转码已被强制关闭，不可开启');
+      return;
+    }
     const newValue = db.getSetting('transcode_video') === '1' ? '0' : '1';
     db.setSetting('transcode_video', newValue);
     await ctx.answerCallbackQuery(`${newValue === '1' ? '✅ 转码已开启' : '⚪ 转码已关闭'}（重启任务后生效）`);

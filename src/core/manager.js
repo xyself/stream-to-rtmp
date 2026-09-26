@@ -6,6 +6,9 @@ const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 const NOT_LIVE_MESSAGE = '主播尚未开播';
 const STREAM_ENDED_MESSAGE = 'STREAM_ENDED';
 
+// 低内存模式（512MB 级小内存主机）：强制关闭转码与截图，避免 OOM
+const LOW_MEMORY = process.env.LOW_MEMORY === '1';
+
 function resolveTargetUrls(task) {
   if (Array.isArray(task.targets) && task.targets.length > 0) {
     return task.targets.map((target) => target.target_url).filter(Boolean);
@@ -124,7 +127,7 @@ class StreamManager {
       targetUrls: this.targetUrls,
       inputHeaders: this.roomOptions.headers,
       globalOutputOptions: task.ffmpeg?.outputOptions || [],
-      transcodeVideo: db.getSetting?.('transcode_video') === '1',
+      transcodeVideo: !LOW_MEMORY && db.getSetting?.('transcode_video') === '1',
       onStart: () => {
           db.updateError(this.task.id, null);
           this._streamStartedAt = Date.now();
@@ -198,6 +201,9 @@ class StreamManager {
   }
 
   async captureSnapshot() {
+    if (LOW_MEMORY) {
+      throw new Error('低内存模式已禁用截图');
+    }
     try {
       let streamUrl = null;
       let source = 'fresh-source';
@@ -452,3 +458,4 @@ module.exports.RetryPolicy = RetryPolicy;
 module.exports.PollPolicy = PollPolicy;
 module.exports.NOT_LIVE_MESSAGE = NOT_LIVE_MESSAGE;
 module.exports.STREAM_ENDED_MESSAGE = STREAM_ENDED_MESSAGE;
+module.exports.isLowMemoryMode = () => LOW_MEMORY;

@@ -27,6 +27,8 @@ const defaultBot = require('./src/bot');
 
 const gistSync = require('./src/db/gist-sync');
 
+const crypto = require('crypto');
+
 
 
 function createApp({
@@ -157,9 +159,21 @@ function createApp({
 
     const port = parseInt(process.env.PORT, 10) || 8080;
 
+    // 默认只监听本地回环；需要对外访问时显式配置 BIND_HOST=0.0.0.0
+    const bindHost = process.env.BIND_HOST || '127.0.0.1';
+    const dashboardToken = process.env.DASHBOARD_TOKEN || '';
 
+    // 面板鉴权：配置了 DASHBOARD_TOKEN 后，面板与数据 API 需要 ?token=xxx
+    function checkDashboardAuth(req, res, next) {
+      if (!dashboardToken) return next();
+      const provided = String(req.query.token || '');
+      const a = Buffer.from(provided);
+      const b = Buffer.from(dashboardToken);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+      res.status(401).json({ error: 'unauthorized' });
+    }
 
-    // 1. 健康检查接口
+    // 1. 健康检查接口（容器健康检查用，保持公开）
 
     app.get('/health', (req, res) => {
 
@@ -171,7 +185,7 @@ function createApp({
 
     // 2. 流量监控面板主页
 
-    app.get('/', (req, res) => {
+    app.get('/', checkDashboardAuth, (req, res) => {
 
       res.send(renderDashboard());
 
@@ -181,7 +195,7 @@ function createApp({
 
     // 3. 流量监控数据 API
 
-    app.get('/api/flow', (req, res) => {
+    app.get('/api/flow', checkDashboardAuth, (req, res) => {
 
       // 按需启用流量统计（如果尚未启用）
 
@@ -235,9 +249,12 @@ function createApp({
 
 
 
-    server = app.listen(port, () => {
+    server = app.listen(port, bindHost, () => {
 
-      logger.log(`🌐 Web 面板及健康检查服务已启动，端口: ${port}`);
+      logger.log(`🌐 Web 面板及健康检查服务已启动，监听: ${bindHost}:${port}`);
+      if (!dashboardToken) {
+        logger.log('⚠️ 未配置 DASHBOARD_TOKEN，面板无鉴权（仅建议本机访问）');
+      }
 
     });
 
@@ -249,7 +266,13 @@ function createApp({
 
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');
 
-
+    // TG_CHAT_ID 为空时直接拒绝启动：避免机器人对所有人开放
+    const allowedChatIds = bot.parseAllowedChatId?.();
+    if (!allowedChatIds || allowedChatIds.size === 0) {
+      logger.error('❌ 未配置 TG_CHAT_ID：为安全起见拒绝启动，请在 .env 中填写授权聊天 ID 后重试');
+      processRef.exit?.(1);
+      return;
+    }
 
     // PORT 有值才启动 Web 服务
 

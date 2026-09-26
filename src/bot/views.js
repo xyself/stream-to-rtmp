@@ -13,8 +13,18 @@ function escapeHtml(text = '') {
 
 function maskTargetUrl(url = '') {
   if (!url) return '未配置';
-  if (url.length <= 36) return url;
-  return `${url.slice(0, 24)}...${url.slice(-8)}`;
+  // 只保留 scheme://host，路径与查询（含推流密钥）全部打码
+  const m = String(url).match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#]+)/);
+  if (m) return `${m[1]}/****`;
+  return '****';
+}
+
+// 把参数数组里形如 URL（含密钥）的参数整体打码，用于展示 FFmpeg 命令行
+function maskSensitiveArgs(args = []) {
+  return (Array.isArray(args) ? args : []).map((arg) => {
+    const s = String(arg);
+    return s.includes('://') ? maskTargetUrl(s) : s;
+  });
 }
 
 function getTargetUrls(task = {}) {
@@ -240,7 +250,7 @@ function renderFfmpegParams(tasks) {
     
     count++;
     lines.push(`<b>${count}. ${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}</b>`);
-    lines.push(`<code>${escapeHtml(traffic.lastArgs.join(' '))}</code>\n`);
+    lines.push(`<code>${escapeHtml(maskSensitiveArgs(traffic.lastArgs).join(' '))}</code>\n`);
   });
 
   if (count === 0) {
@@ -262,6 +272,7 @@ module.exports = {
   renderSystemStatus,
   formatBytes,
   maskTargetUrl,
+  maskSensitiveArgs,
   getTargetUrls,
   progressBar,
   formatUptime,
