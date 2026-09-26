@@ -9,7 +9,7 @@
 #   2. 克隆或更新代码，安装依赖
 #   3. 生成 .env 并交互式填写全部配置项（必填 + 可选，PORT 填了才追问面板相关）
 #   4. 如配了 Gist 且本地无数据库，自动从 Gist 恢复房间列表
-#   5. 以低内存参数启动（NODE_OPTIONS=--max-old-space-size=256）
+#   5. 以限制内存参数启动（NODE_OPTIONS=--max-old-space-size=256）
 #   6. 安装 cron 看门：每 5 分钟检查一次，进程死了自动拉起
 set -e
 
@@ -72,7 +72,6 @@ prompt_if_empty() {
 log ">> 填写配置（标'可选'的直接回车跳过）"
 prompt_if_empty "TG_TOKEN" "Telegram Bot Token（必填）" ""
 prompt_if_empty "TG_CHAT_ID" "Telegram 数字 ID（必填，多个逗号分隔）" ""
-prompt_if_empty "LOW_MEMORY" "低内存模式 1=开 0=关" "1"
 prompt_if_empty "GIST_TOKEN" "Gist Token（可选，用于同步房间配置）" ""
 prompt_if_empty "GIST_ID" "Gist ID（可选）" ""
 prompt_if_empty "FFMPEG_PATH" "ffmpeg 路径（可选，默认用系统 PATH）" ""

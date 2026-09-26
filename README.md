@@ -44,10 +44,9 @@ FFMPEG_PATH=ffmpeg (或具体路径)
 DATABASE_PATH=./data/data.db
 GIST_TOKEN=你的GithubToken (可选)
 GIST_ID=你的GistID (可选)
-# 可选：面板监听地址（默认 127.0.0.1）、面板访问令牌、低内存模式（512MB 主机建议开启）
+# 可选：面板监听地址（默认 127.0.0.1）、面板访问令牌
 # BIND_HOST=127.0.0.1
 # DASHBOARD_TOKEN=访问面板需要的 token
-# LOW_MEMORY=1
 ```
 ### 🔒 安全说明
 
