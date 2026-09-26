@@ -15,7 +15,7 @@ set -e
 
 APP_DIR="$HOME/apps/stream-to-rtmp"
 REPO_URL="https://github.com/xyself/stream-to-rtmp.git"
-NODE_OPTS="--max-old-space-size=256"
+NODE_OPTS="--max-old-space-size=512"
 PROC_PATTERN="stream-to-rtmp/main.js"
 WATCHDOG_MARK="# stream-to-rtmp-watchdog"
 
