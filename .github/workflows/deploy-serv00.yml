@@ -1,0 +1,30 @@
+name: deploy-serv00
+
+# push 到 main 自动部署到 serv00；也可手动触发。
+# 纯文档 / workflow 自身的修改不触发部署，避免无意义重启。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: serv00-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SERV00_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 s11.serv00.com >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Deploy to serv00
+        run: |
+          ssh -o BatchMode=yes -o ConnectTimeout=20 chengua@s11.serv00.com 'bash ~/apps/stream-to-rtmp/scripts/deploy-serv00.sh'
