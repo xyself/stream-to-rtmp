@@ -32,10 +32,11 @@ jobs:
           APP_DIR="$HOME/domains/stream-to-rtmp"
           cd "$APP_DIR"
           echo ">> 停止旧进程（看门循环 + node，SIGTERM 优雅退出）..."
+          # 注意：node 是以相对路径 "node main.js" 启动的，pgrep -f 必须匹配实际命令行
           pkill -f "stream-to-rtmp/scripts/auto-start.sh" || true
-          pkill -f "domains/stream-to-rtmp/main.js" || true
+          pkill -f "node main.js" || true
           for i in $(seq 1 15); do
-            pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null || break
+            pgrep -f "node main.js" >/dev/null || break
             sleep 2
           done
           echo ">> 拉新代码（强制同步到 origin/main，处理 dev->main 这类分支切换）..."
@@ -49,10 +50,10 @@ jobs:
           # 注意 </dev/null：stdin 不重定向时 ssh 会话会卡住不退出
           nohup ./scripts/auto-start.sh </dev/null >/dev/null 2>&1 &
           for i in $(seq 1 10); do
-            pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null && break
+            pgrep -f "node main.js" >/dev/null && break
             sleep 2
           done
-          if pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null; then
+          if pgrep -f "node main.js" >/dev/null; then
             echo "DEPLOY_OK"
           else
             echo "DEPLOY_FAIL"

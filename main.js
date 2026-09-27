@@ -471,7 +471,14 @@ function createApp({
 
     } catch (err) {
 
-      logger.error('❌ 系统启动过程中发生致命错误:', err);
+      // 409：有另一个实例在用同一个 bot token 轮询（幽灵进程），给中文提示
+      const isConflict409 = err?.error_code === 409 || /409|Conflict/i.test(String(err?.description || err?.message || ''));
+      if (isConflict409) {
+        logger.error('❌ Telegram 409 冲突：检测到另一个实例正在用同一个 bot token 运行（幽灵进程）。');
+        logger.error('   请先杀掉旧进程再启动：pkill -f "node main.js"（注意确认是本应用的进程）');
+      } else {
+        logger.error('❌ 系统启动过程中发生致命错误:', err);
+      }
 
       processRef.exit?.(1);
 
