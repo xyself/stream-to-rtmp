@@ -142,11 +142,16 @@ class StreamManager {
           this.consecutiveStreamFailures = 0; // 推流成功，熔断计数清零
 
           const wasOffline = this.lastNotifyType === 'offline' || this.lastNotifyType === 'stream_ended';
-          
+          // 报错（取流/推流失败）后恢复也算"回来了"，否则用户只收到报错、收不到恢复通知
+          const wasError = this.lastNotifyType === 'error' || this.lastNotifyType === 'ffmpeg_error';
+          const shouldNotifyLive = wasOffline || wasError;
+
           // 异步获取房间信息和截图
-          setTimeout(async () => {
+          if (this._notifyTimer) clearTimeout(this._notifyTimer);
+          this._notifyTimer = setTimeout(async () => {
+            this._notifyTimer = null;
             if (this.isStopping || !this.ffmpeg?.getTrafficStats().running) return;
-            
+
             // 始终尝试获取房间信息
             try {
               this.roomInfo = await this.room.getInfo();
@@ -154,7 +159,7 @@ class StreamManager {
               console.error(`[${this.task.room_id}] 获取房间信息失败:`, err.message);
             }
 
-            if (wasOffline) {
+            if (shouldNotifyLive) {
               let imageBuffer = null;
               try {
                 imageBuffer = await this.captureSnapshot();
@@ -166,12 +171,16 @@ class StreamManager {
                 ? `\n👤 ${this.roomInfo.hostName}` + (this.roomInfo.roomName ? ` — ${this.roomInfo.roomName}` : '')
                 : '';
 
+              // 下播后开播 vs 报错后恢复，文案区分开
+              const liveMsg = wasOffline ? '🟢 开播了！正在推流中...' : '🟢 推流恢复了，正在推流中...';
               this.onNotify({
                 taskId: this.task.id,
                 type: 'live_start',
-                message: `🟢 开播了！正在推流中...${infoLine}`,
+                message: `${liveMsg}${infoLine}`,
                 imageBuffer,
               });
+              // 发完立刻改状态：60 秒内再重连不会重复发（之后 tick 满 60 秒会置为 running）
+              this.lastNotifyType = 'live_start';
             }
           }, 5000); // 5秒延迟，确保流稳定且封面已更新
         },
