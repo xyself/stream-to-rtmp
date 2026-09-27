@@ -59,6 +59,9 @@ GIST_ID=你的GistID (可选)
 npm start
 ```
 
+若需要在生产环境中后台运行并进行异常自动重启守护，可以使用内置的守护脚本。详见 [自动启动与守护脚本教程](docs/auto-start.md)。
+
+
 ## 🖥️ 管理入口
 
 - **Telegram Bot**: 发送 `/start` 调出控制中心。

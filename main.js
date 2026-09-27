@@ -6,6 +6,8 @@ const express = require('express');
 
 const { renderDashboard } = require('./src/web/dashboard');
 
+const { restoreOnce } = require('./src/init/restore');
+
 // 使用系统 FFmpeg，或通过 FFMPEG_PATH 环境变量指定自定义路径
 
 if (process.env.FFMPEG_PATH) {
@@ -47,25 +49,7 @@ function createApp({
 
   let shuttingDown = false;
 
-  let readySent = false;
-
   let server = null; // 合并为一个 server 实例
-
-
-
-  function sendReady() {
-
-    if (readySent) return;
-
-    readySent = true;
-
-    if (typeof processRef.send === 'function') {
-
-      processRef.send('ready');
-
-    }
-
-  }
 
 
 
@@ -263,6 +247,8 @@ function createApp({
 
 
   async function bootstrap() {
+    
+    await restoreOnce();
 
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');
 
@@ -367,8 +353,6 @@ function createApp({
           logger.log(`🤖 机器人 @${info.username} 已上线`);
 
           logger.log('------------------------------------');
-
-          sendReady();
 
           const chatIds = bot.parseAllowedChatId?.();
           if (chatIds) {
