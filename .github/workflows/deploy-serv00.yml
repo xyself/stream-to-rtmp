@@ -1,6 +1,6 @@
 name: deploy-serv00
 
-# push 到 main 自动部署到 serv00；也可手动触发。
+# push 到 main 自动部署到 serv00（实际路径 ~/domains/stream-to-rtmp）；也可手动触发。
 # 纯文档 / workflow 自身的修改不触发部署，避免无意义重启。
 on:
   push:
@@ -27,4 +27,34 @@ jobs:
           ssh-keyscan -t ed25519 s11.serv00.com >> ~/.ssh/known_hosts 2>/dev/null
       - name: Deploy to serv00
         run: |
-          ssh -o BatchMode=yes -o ConnectTimeout=20 chengua@s11.serv00.com 'bash ~/apps/stream-to-rtmp/scripts/deploy-serv00.sh'
+          ssh -o BatchMode=yes -o ConnectTimeout=20 chengua@s11.serv00.com << 'DEPLOYEOF'
+          set -e
+          APP_DIR="$HOME/domains/stream-to-rtmp"
+          cd "$APP_DIR"
+          echo ">> 停止旧进程（看门循环 + node，SIGTERM 优雅退出）..."
+          pkill -f "stream-to-rtmp/scripts/auto-start.sh" || true
+          pkill -f "domains/stream-to-rtmp/main.js" || true
+          for i in $(seq 1 15); do
+            pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null || break
+            sleep 2
+          done
+          echo ">> 拉新代码（本地改动 stash 保护）..."
+          git stash push -m "auto-deploy" || true
+          git pull --ff-only origin main
+          git stash pop || echo "WARN: stash pop 有冲突，请手动检查 git 状态"
+          echo ">> 安装依赖..."
+          npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund
+          echo ">> 重启看门循环..."
+          nohup ./scripts/auto-start.sh >/dev/null 2>&1 &
+          for i in $(seq 1 10); do
+            pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null && break
+            sleep 2
+          done
+          if pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null; then
+            echo "DEPLOY_OK"
+          else
+            echo "DEPLOY_FAIL"
+            tail -n 30 logs/auto-start.log || true
+            exit 1
+          fi
+          DEPLOYEOF
