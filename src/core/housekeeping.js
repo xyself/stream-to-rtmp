@@ -1,6 +1,7 @@
 // 后台杂务：每日推流小结、内存/磁盘水位告警
 // serv00 免费档只有 512MB 内存 / 3GB 磁盘，水位超了第一时间 TG 吱一声
 const { exec } = require('child_process');
+const db = require('../db');
 
 const DIGEST_HOUR_CST = 8; // 北京时间每天 8 点推送小结
 const MEM_ALERT_MB = 400;  // 内存水位线（serv00 免费档 512MB）
@@ -24,6 +25,10 @@ function platformLabel(p) {
 }
 
 async function sendDailyDigest(scheduler, bot) {
+  // 用户在通知管理里关掉小结就跳过
+  try {
+    if (db.getSetting('notify_digest') === '0') return;
+  } catch (err) { /* 读不到配置就默认发 */ }
   const stats = scheduler.getDigestStats();
   const d = cstNow();
   const dateStr = `${d.getUTCMonth() + 1}-${d.getUTCDate()}`;

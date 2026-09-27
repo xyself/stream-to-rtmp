@@ -49,7 +49,8 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard, buildTask
   };
 
   const showRooms = async (ctx) => {
-    const tasks = db.getAllTasks();
+    // 带流量数据，房间管理才能按「推流中/待机/已暂停」分组展示
+    const tasks = scheduler.getTrafficStats();
     await ctx.reply(views.renderRoomList(tasks), {
       parse_mode: 'HTML',
       reply_markup: tasks.length ? buildTaskListKeyboard(tasks) : mainKeyboard,
@@ -124,6 +125,26 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard, buildTask
         : `❌ 获取截图失败: ${msg}`;
       await ctx.reply(userMessage);
     }
+  });
+
+  bot.callbackQuery(/^stat:(\d+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务已不存在'); return; }
+    await ctx.answerCallbackQuery();
+    const entry = scheduler.getTrafficStats().find((s) => String(s.id) === String(task.id));
+    await ctx.reply(views.renderDetailedStatus(entry ? [entry] : []), { parse_mode: 'HTML' });
+  });
+
+  bot.callbackQuery(/^failover:(\d+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务已不存在'); return; }
+    const manager = scheduler.getTaskManager?.(task);
+    if (!manager || !manager.backupUrls || manager.backupUrls.length === 0) {
+      await ctx.answerCallbackQuery({ text: '没有备用线路可切换', show_alert: true });
+      return;
+    }
+    const ok = manager.manualFailover();
+    await ctx.answerCallbackQuery(ok ? `已切换到备用线路（剩余 ${manager.backupUrls.length} 条）` : '切换失败');
   });
 
   bot.callbackQuery(/^del:(\d+)/, async (ctx) => {

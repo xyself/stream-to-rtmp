@@ -67,12 +67,26 @@ function buildTaskListKeyboard(tasks) {
   return keyboard;
 }
 
+// 📊 推流状态：先列房间，点进去看详情
+function buildStatusListKeyboard(entries) {
+  const keyboard = new InlineKeyboard();
+  entries.forEach((entry) => {
+    const running = entry.traffic?.running;
+    const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
+    const kbps = Math.round(entry.traffic?.bitrateKbps || 0);
+    const extra = running && kbps > 0 ? ` · ${kbps}k` : '';
+    keyboard.text(`${icon} ${views.platformLabel(entry.platform)} #${entry.room_id}${extra}`, `tstatus:${entry.id}`).row();
+  });
+  return keyboard;
+}
+
 function buildTaskDetailKeyboard(task) {
   const keyboard = new InlineKeyboard()
     .text(task.status === 'ENABLED' ? '🛑 停止监控' : '▶️ 开启监控', `toggle:${task.id}:${task.status}`)
     .row();
   if (task.status === 'ENABLED') {
     keyboard.text('📸 获取截图', `screenshot:${task.id}`).row();
+    keyboard.text('📊 本场统计', `stat:${task.id}`).text('🔀 切换线路', `failover:${task.id}`).row();
   }
   keyboard
     .text('🔄 刷新', `refresh:${task.id}`)
@@ -101,6 +115,7 @@ function buildAlertKeyboard(taskId) {
     .text('🔄 立即重试', `alert_retry:${taskId}`)
     .text('🛑 暂停任务', `alert_pause:${taskId}`)
     .row()
+    .text('📸 看画面', `alert_snap:${taskId}`)
     .text('📺 查看详情', `alert_detail:${taskId}`);
 }
 
@@ -154,6 +169,11 @@ function isNotificationEnabled(type) {
     stream_ended: 'notify_stream_ended',
     ffmpeg_error: 'notify_ffmpeg_error',
     error: 'notify_ffmpeg_error',
+    output_failed: 'notify_output_failed',
+    black_screen: 'notify_black_screen',
+    bitrate_drop: 'notify_bitrate_drop',
+    failover: 'notify_failover',
+    resource: 'notify_resource',
   };
   const key = keyMap[type];
   if (!key) return true;
@@ -205,42 +225,40 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   const showStatus = async (ctx) => {
-    // 触发立即刷新房间信息，确保获取最新封面和标题
-    try {
-      await Promise.race([
-        scheduler.refreshAllRoomInfo(),
-        new Promise((resolve) => setTimeout(resolve, 3000)), // 最多等3秒
-      ]);
-    } catch (err) {}
-
     const stats = scheduler.getTrafficStats();
     if (stats.length === 0) {
-      return await ctx.reply('当前没有正在运行的任务');
+      return await ctx.reply('当前还没有配置房间');
     }
-
-    for (const task of stats) {
-      const roomInfo = task.traffic?.roomInfo || {};
-      const statusText = views.renderDetailedStatus([task]);
-      
-      if (roomInfo.cover) {
-        // 添加时间戳防止 TG 缓存旧封面
-        const coverUrl = roomInfo.cover.includes('?') 
-          ? `${roomInfo.cover}&t=${Date.now()}` 
-          : `${roomInfo.cover}?t=${Date.now()}`;
-          
-        try {
-          await ctx.replyWithPhoto(coverUrl, {
-            caption: statusText,
-            parse_mode: 'HTML',
-          });
-          continue;
-        } catch (err) {
-          // 忽略发送失败
-        }
-      }
-      await ctx.reply(statusText, { parse_mode: 'HTML' });
-    }
+    await ctx.reply(views.renderStatusList(stats), {
+      parse_mode: 'HTML',
+      reply_markup: buildStatusListKeyboard(stats),
+    });
   };
+
+  bot.callbackQuery(/^tstatus:(\d+)/, async (ctx) => {
+    const entry = scheduler.getTrafficStats().find((s) => String(s.id) === ctx.match[1]);
+    if (!entry) { await ctx.answerCallbackQuery('房间不存在'); return; }
+    await ctx.answerCallbackQuery();
+    const statusText = views.renderDetailedStatus([entry]);
+    const roomInfo = entry.traffic?.roomInfo || {};
+    const backKb = new InlineKeyboard().text('⬅️ 返回房间列表', 'tstatus_back');
+    if (roomInfo.cover) {
+      // 添加时间戳防止 TG 缓存旧封面
+      const coverUrl = roomInfo.cover.includes('?')
+        ? `${roomInfo.cover}&t=${Date.now()}`
+        : `${roomInfo.cover}?t=${Date.now()}`;
+      try {
+        await ctx.replyWithPhoto(coverUrl, { caption: statusText, parse_mode: 'HTML', reply_markup: backKb });
+        return;
+      } catch (err) { /* 封面发送失败就降级为纯文本 */ }
+    }
+    await ctx.reply(statusText, { parse_mode: 'HTML', reply_markup: backKb });
+  });
+
+  bot.callbackQuery('tstatus_back', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showStatus(ctx);
+  });
 
   bot.use(createChatGuard());
   bot.use(session({ initial: () => ({ addRoom: { step: null, roomId: null, platform: null } }) }));
@@ -308,6 +326,23 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       parse_mode: 'HTML',
       reply_markup: buildTaskDetailKeyboard(task),
     });
+  });
+
+  bot.callbackQuery(/^alert_snap:(.+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
+    const manager = scheduler.getTaskManager?.(task);
+    if (!manager) { await ctx.answerCallbackQuery({ text: '任务当前没在推流，截不到画面', show_alert: true }); return; }
+    await ctx.answerCallbackQuery('正在截图…');
+    try {
+      const imageBuffer = await manager.captureSnapshot();
+      await ctx.replyWithPhoto(
+        new InputFile(imageBuffer, `alert_${task.room_id}.jpg`),
+        { caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 当前画面` }
+      );
+    } catch (err) {
+      await ctx.reply(`截图失败: ${err.message || '未知错误'}`);
+    }
   });
 
   bot.callbackQuery('global_enable_all', async (ctx) => {

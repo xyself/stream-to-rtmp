@@ -594,6 +594,25 @@ class StreamManager {
     return true;
   }
 
+  // TG 面板「🔀 切换线路」：主动换下一条备用线路
+  manualFailover() {
+    if (!this.backupUrls || this.backupUrls.length === 0) return false;
+    const backupUrl = this.backupUrls.shift();
+    console.log(`[${this.task.room_id}] 手动切换备用线路: ${maskHost(backupUrl)}（剩余 ${this.backupUrls.length} 条）`);
+    this.stopStreaming();
+    this.consecutiveStreamFailures = 0;
+    this.bitratePeak = 0;
+    this.lowBitrateTicks = 0;
+    this.currentStreamUrl = backupUrl;
+    this.process = this.ffmpeg.start(backupUrl);
+    this.onNotify({
+      taskId: this.task.id,
+      type: 'failover',
+      message: `已手动切换到备用线路继续推流`,
+    });
+    return true;
+  }
+
   handleStreamEnded() {
     this.saveSessionStats();
     this.stopStreaming();

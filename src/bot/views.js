@@ -52,18 +52,38 @@ function renderRoomList(tasks = []) {
     return '<b>📭 房间管理</b>\n\n当前还没有已配置房间\n点击「➕ 添加房间」开始创建';
   }
 
+  // 按状态分组：推流中 / 待机轮询 / 已暂停
+  const live = [];
+  const idle = [];
+  const paused = [];
+  for (const task of tasks) {
+    if (task.status !== 'ENABLED') { paused.push(task); continue; }
+    if (task.traffic?.running) { live.push(task); continue; }
+    idle.push(task);
+  }
+
   const lines = [
-    '<b>🏠 房间管理</b>',
-    '',
-    '<i>选择房间进入控制台：</i>',
+    `<b>🏠 房间管理</b> · 共 ${tasks.length} 个房间`,
     '',
   ];
-  
-  tasks.forEach((task, index) => {
-    const status = task.status === 'ENABLED' ? '✅' : '🛑';
-    lines.push(`${index + 1}. ${status} ${escapeHtml(platformLabel(task.platform))} · #${escapeHtml(task.room_id)}`);
+
+  const renderGroup = (icon, title, group, detail) => {
+    if (group.length === 0) return;
+    lines.push(`${icon} <b>${title}</b>（${group.length}）`);
+    for (const task of group) {
+      lines.push(`▪️ ${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}${detail(task)}`);
+    }
+    lines.push('');
+  };
+
+  renderGroup('🟢', '推流中', live, (t) => {
+    const kbps = Math.round(t.traffic?.bitrateKbps || 0);
+    return kbps > 0 ? ` · ${kbps} kbps` : '';
   });
-  
+  renderGroup('⚪', '待机 / 轮询中', idle, () => ' · 等待开播');
+  renderGroup('🛑', '已暂停', paused, () => '');
+
+  lines.push('<i>点下方按钮进入房间控制台</i>');
   return lines.join('\n');
 }
 
@@ -156,6 +176,19 @@ function renderSystemStatus(stats = {}) {
   return renderDashboard({ stats });
 }
 
+// 📊 推流状态：一级列表（点房间进详情）
+function renderStatusList(entries = []) {
+  const liveCount = entries.filter((e) => e.traffic?.running).length;
+  const enabledCount = entries.filter((e) => e.status === 'ENABLED').length;
+  return [
+    '<b>📊 推流状态</b>',
+    '',
+    `🟢 ${liveCount} 路推流中 · ⚪ ${enabledCount - liveCount} 待机 · 共 ${entries.length} 个房间`,
+    '',
+    '<i>点下方房间查看详情：</i>',
+  ].join('\n');
+}
+
 function renderRoomTraffic(tasks = []) {
   if (tasks.length === 0) {
     return '<b>📈 流量查看</b>\n\n当前没有房间流量数据';
@@ -219,6 +252,12 @@ const NOTIFICATION_TYPES = [
   { key: 'notify_stream_ended', label: '🔴 关播通知', desc: '直播结束时推送' },
   { key: 'notify_ffmpeg_error', label: '⚠️ 断流通知', desc: 'FFmpeg 推流出错时推送' },
   { key: 'notify_offline',      label: '📌 下播通知', desc: '房间下播 / 未开播时推送' },
+  { key: 'notify_output_failed', label: '🔌 输出断开', desc: '某路推流目标断开时推送' },
+  { key: 'notify_black_screen',  label: '⬛ 黑屏告警', desc: '画面疑似黑屏时推送' },
+  { key: 'notify_bitrate_drop',  label: '📉 码率下跌', desc: '码率大幅下跌时推送' },
+  { key: 'notify_failover',      label: '🔀 线路切换', desc: '切换备用线路时推送' },
+  { key: 'notify_resource',      label: '💾 资源告警', desc: '内存/磁盘水位偏高时推送' },
+  { key: 'notify_digest',        label: '📊 每日小结', desc: '每天早上 8 点推送推流小结' },
 ];
 
 function renderNotificationSettings(settings = {}) {
@@ -291,6 +330,7 @@ module.exports = {
   renderDashboard,
   renderRoomTraffic,
   renderDetailedStatus,
+  renderStatusList,
   renderSystemStatus,
   formatBytes,
   maskTargetUrl,
