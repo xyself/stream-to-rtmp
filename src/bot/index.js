@@ -19,7 +19,8 @@ async function safeEditMessageText(ctx, text, options) {
 }
 
 function createChatGuard(allowedChatId = parseAllowedChatId()) {
-  if (!allowedChatId) return async (ctx, next) => next();
+  // 白名单为空直接拒绝（fail-closed）；正常启动时 main.js 已拒绝空 TG_CHAT_ID，这里是兜底
+  if (!allowedChatId || allowedChatId.size === 0) return async (ctx, next) => {};
   return async (ctx, next) => {
     const chatId = ctx?.chat?.id;
     if (!allowedChatId.has(String(chatId))) {
@@ -92,6 +93,15 @@ function buildNotificationKeyboard(settings) {
     keyboard.text(`${enabled ? '✅' : '⛔'} ${item.label}`, `ntoggle:${item.key}`).row();
   }
   return keyboard;
+}
+
+// 告警消息的一键干预按钮：报错时直接在通知上点，不用翻面板
+function buildAlertKeyboard(taskId) {
+  return new InlineKeyboard()
+    .text('🔄 立即重试', `alert_retry:${taskId}`)
+    .text('🛑 暂停任务', `alert_pause:${taskId}`)
+    .row()
+    .text('📺 查看详情', `alert_detail:${taskId}`);
 }
 
 function getSystemInfo() {
@@ -273,6 +283,33 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     });
   });
 
+  bot.callbackQuery(/^alert_retry:(.+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
+    await ctx.answerCallbackQuery('正在重试…');
+    try { await scheduler.refreshTask?.(task); } catch (err) {
+      await ctx.reply(`重试失败: ${err.message}`);
+    }
+  });
+
+  bot.callbackQuery(/^alert_pause:(.+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
+    db.updateTaskStatus(task.id, 'DISABLED');
+    await scheduler.tick?.();
+    await ctx.answerCallbackQuery('已暂停该任务');
+  });
+
+  bot.callbackQuery(/^alert_detail:(.+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
+    await ctx.answerCallbackQuery();
+    await ctx.reply(views.renderTaskDetail(task, scheduler.isTaskRunning(task)), {
+      parse_mode: 'HTML',
+      reply_markup: buildTaskDetailKeyboard(task),
+    });
+  });
+
   bot.callbackQuery('global_enable_all', async (ctx) => {
     db.enableAllTasks();
     await scheduler.tick?.();
@@ -357,24 +394,39 @@ defaultBot.handleManagerNotification = function(notification) {
   if (!task) return;
   if (!isNotificationEnabled(type)) return;
 
+  // 告警去重：
+  // - error / ffmpeg_error：同任务同类型 10 分钟内只发一次
+  //   （之前按整条消息原文比对，ffmpeg 报错里带变化的 stderr 从未命中，等于没去重）
+  // - 状态变化类（开播/下播/结束）：沿用整条消息比对，避免漏掉真实的状态翻转
   const key = `${taskId}-${type}`;
-  if (this._lastNotified?.[key] === message) return;
-  if (!this._lastNotified) this._lastNotified = {};
-  this._lastNotified[key] = message;
+  if (type === 'error' || type === 'ffmpeg_error') {
+    const now = Date.now();
+    if (!this._lastNotifiedAt) this._lastNotifiedAt = {};
+    if (now - (this._lastNotifiedAt[key] || 0) < 10 * 60 * 1000) return;
+    this._lastNotifiedAt[key] = now;
+  } else {
+    if (this._lastNotified?.[key] === message) return;
+    if (!this._lastNotified) this._lastNotified = {};
+    this._lastNotified[key] = message;
+  }
 
   const label = `${views.platformLabel(task.platform)} #${task.room_id}`;
+  const friendly = (type === 'error' || type === 'ffmpeg_error') ? views.humanizeError(message) : message;
   let text = '';
   switch (type) {
     case 'live_start':    text = `🖥️${label}\n💬 ${message}`; break;
     case 'offline':       text = `📌 ${label}\n💬 ${message}`; break;
     case 'stream_ended':  text = `🔴 ${label}\n💬 ${message}`; break;
-    case 'error':         text = `⚠️ ${label}\n💬 错误: ${message}`; break;
-    case 'ffmpeg_error':  text = `❌ ${label}\n💬 ${message}`; break;
+    case 'error':         text = `⚠️ ${label}\n💬 ${friendly}`; break;
+    case 'ffmpeg_error':  text = `❌ ${label}\n💬 ${friendly}`; break;
     default: return;
   }
 
   const chatIds = parseAllowedChatId();
   if (!chatIds || !chatIds.size || typeof this.api?.sendMessage !== 'function') return;
+
+  // 报错类通知带一键干预按钮：立即重试 / 暂停任务 / 查看详情
+  const alertKeyboard = (type === 'error' || type === 'ffmpeg_error') ? buildAlertKeyboard(taskId) : undefined;
 
   const sendToAll = async () => {
     for (const chatId of chatIds) {
@@ -382,7 +434,7 @@ defaultBot.handleManagerNotification = function(notification) {
         if (type === 'live_start' && notification.imageBuffer) {
           await this.api.sendPhoto(chatId, new InputFile(notification.imageBuffer, `live_${task.room_id}.jpg`), { caption: text });
         } else {
-          await this.api.sendMessage(chatId, text);
+          await this.api.sendMessage(chatId, text, alertKeyboard ? { reply_markup: alertKeyboard } : undefined);
         }
       } catch (err) {
         console.error(`发送 Telegram 通知失败 (chat: ${chatId}):`, err.message);
@@ -406,5 +458,6 @@ module.exports.getRecentErrors = getRecentErrors;
 module.exports.getNotificationSettings = getNotificationSettings;
 module.exports.isNotificationEnabled = isNotificationEnabled;
 module.exports.buildNotificationKeyboard = buildNotificationKeyboard;
+module.exports.buildAlertKeyboard = buildAlertKeyboard;
 module.exports.registerBotCommands = registerBotCommands;
 module.exports.saveRoomTask = roomHandlers.saveRoomTask;

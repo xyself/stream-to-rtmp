@@ -11,16 +11,14 @@ services:
       FFMPEG_PATH: /usr/bin/ffmpeg
       DATABASE_PATH: /app/data/data.db
       PORT: 8080
+      # 注意：服务默认只监听 127.0.0.1；对外开放时必须配置 DASHBOARD_TOKEN，
+      # 否则启动会被拒绝（见 main.js）
+      BIND_HOST: 0.0.0.0
     ports:
       - "8080:8080"  # 健康检查端口
     volumes:
       - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+    # 健康检查走 Dockerfile 里的 HEALTHCHECK（busybox wget），这里不再重复定义
     logging:
       driver: json-file
       options:

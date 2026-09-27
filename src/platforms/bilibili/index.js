@@ -6,6 +6,9 @@ function buildHeaders(defaultHeaders = {}, overrideHeaders = {}) {
   return { ...defaultHeaders, ...overrideHeaders };
 }
 
+// 平台接口统一超时：15 秒，避免某个请求 hang 住拖成僵尸任务
+const PLATFORM_TIMEOUT = 15000;
+
 class BilibiliEngine {
   constructor() {
     this.agent = DEFAULT_USER_AGENT;
@@ -13,7 +16,7 @@ class BilibiliEngine {
 
   async getRealId(roomId, options = {}) {
     const headers = buildHeaders({ 'User-Agent': this.agent }, options.headers);
-    const res = await axios.get(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomId}`, { headers });
+    const res = await axios.get(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomId}`, { headers, timeout: PLATFORM_TIMEOUT });
     if (res.data.code !== 0) throw new Error('B站房间不存在或已失效');
     return res.data.data.room_id.toString();
   }
@@ -24,7 +27,7 @@ class BilibiliEngine {
 
     const roomRes = await axios.get(
       `https://api.live.bilibili.com/room/v1/Room/get_info?room_id=${realId}&from=room`,
-      { headers }
+      { headers, timeout: PLATFORM_TIMEOUT }
     );
     if (roomRes.data.code !== 0) throw new Error('B站房间不存在');
 
@@ -37,7 +40,7 @@ class BilibiliEngine {
     try {
       const userRes = await axios.get(
         `https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid=${realId}`,
-        { headers }
+        { headers, timeout: PLATFORM_TIMEOUT }
       );
       if (userRes.data.code === 0) {
         hostName = userRes.data.data?.info?.uname || '';
@@ -58,10 +61,16 @@ class BilibiliEngine {
       }, options.headers);
 
       const apiUrl = `https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=${realId}&protocol=0,1&format=0,1,2&codec=0,1&qn=10000&platform=web&ptype=8`;
-      const res = await axios.get(apiUrl, { headers });
+      const res = await axios.get(apiUrl, { headers, timeout: PLATFORM_TIMEOUT });
+
+      // 先查返回码：B站风控（-352/-412 等）时 data 为空，
+      // 不查码会走到"未开播"分支，把"被限流"误报成"主播下播"
+      if (res.data.code !== 0) {
+        throw new Error(`B站接口返回异常 (code=${res.data.code})：${res.data.message || '未知错误'}`);
+      }
 
       const playurl = res.data.data?.playurl_info?.playurl;
-      if (!playurl) throw new Error('主播尚未开播');
+      if (!playurl) throw new Error('未获取到播放地址（可能暂无可用线路）');
 
       for (const stream of playurl.stream) {
         const flvFormat = stream.format.find((f) => f.format_name === 'flv');

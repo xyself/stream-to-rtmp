@@ -6,6 +6,15 @@ const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 const NOT_LIVE_MESSAGE = '主播尚未开播';
 const STREAM_ENDED_MESSAGE = 'STREAM_ENDED';
 
+// 熔断阈值：连续多少次推流侧失败后自动禁用任务
+const CIRCUIT_BREAKER_THRESHOLD = 20;
+
+// 退避抖动：±20%，避免多任务同时重试打爆平台接口
+function withJitter(delay, ratio = 0.2) {
+  const delta = delay * ratio;
+  return Math.round(delay - delta + Math.random() * delta * 2);
+}
+
 function resolveTargetUrls(task) {
   if (Array.isArray(task.targets) && task.targets.length > 0) {
     return task.targets.map((target) => target.target_url).filter(Boolean);
@@ -61,7 +70,7 @@ class RetryPolicy {
   nextDelay() {
     const delay = Math.min(this.attempts * this.stepDelay + this.baseDelay, this.maxDelay);
     this.attempts += 1;
-    return delay;
+    return withJitter(delay);
   }
 
   reset() {
@@ -80,11 +89,11 @@ class PollPolicy {
   nextDelay(reason) {
     if (reason === STREAM_ENDED_MESSAGE) {
       this.streamEndedAttempts += 1;
-      return this.streamEndedDelay;
+      return withJitter(this.streamEndedDelay);
     }
 
     this.notLiveAttempts += 1;
-    return this.notLiveDelay;
+    return withJitter(this.notLiveDelay);
   }
 
   reset() {
@@ -110,6 +119,7 @@ class StreamManager {
     this.lastErrorMessage = null;
     this.errorCount = 0;
     this.lastSuccessAt = null;
+    this.consecutiveStreamFailures = 0; // 连续推流侧失败次数（熔断用；"未开播"不算）
 
     // 流量统计相关
     this.trafficStats = {
@@ -129,6 +139,7 @@ class StreamManager {
           db.updateError(this.task.id, null);
           this._streamStartedAt = Date.now();
           this.lastSuccessAt = new Date().toISOString();
+          this.consecutiveStreamFailures = 0; // 推流成功，熔断计数清零
 
           const wasOffline = this.lastNotifyType === 'offline' || this.lastNotifyType === 'stream_ended';
           
@@ -330,6 +341,7 @@ class StreamManager {
                       lowerMsg.includes('offline') ||
                       lowerMsg.includes('未直播') ||
                       lowerMsg.includes('live status is 0');
+    const isRateLimited = lowerMsg.includes('限流') || lowerMsg.includes('rate limit');
     const errorType = isOffline ? 'offline' : 'error';
 
     if (isOffline) {
@@ -357,14 +369,33 @@ class StreamManager {
 
     const delay = this.pollPolicy.nextDelay(msg);
     this.retryPolicy.reset();
-    this.scheduleStart(delay);
+    if (isRateLimited) {
+      // 限流类错误走退避重试（越限越慢），而不是固定 2 分钟轮询去撞墙
+      this.pollPolicy.reset();
+      this.scheduleStart(this.retryPolicy.nextDelay());
+    } else {
+      this.scheduleStart(delay);
+    }
   }
 
   handleFfmpegError(msg) {
     this.errorCount += 1;
+    this.consecutiveStreamFailures += 1;
     this.saveSessionStats();
     this.stopStreaming();
     db.updateError(this.task.id, msg);
+
+    // 熔断：连续 20 次推流侧失败（不含"主播未开播"），自动禁用任务，
+    // 避免某个坏掉的任务无限烧平台接口 + 刷屏
+    if (this.consecutiveStreamFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+      db.updateTaskStatus?.(this.task.id, 'DISABLED');
+      this.onNotify({
+        taskId: this.task.id,
+        type: 'error',
+        message: `任务已自动熔断：连续 ${this.consecutiveStreamFailures} 次推流失败，已暂停该任务（手动开启可恢复）`,
+      });
+      return; // 不再排期；scheduler.tick 会清理掉已禁用的 manager
+    }
 
     if (this.lastNotifyType !== 'ffmpeg_error' || this.lastErrorMessage !== msg) {
       this.lastNotifyType = 'ffmpeg_error';
@@ -377,10 +408,11 @@ class StreamManager {
     }
 
     // 检测流 URL 过期错误（B站等平台的签名过期），立即重新获取新 URL
-    const isUrlExpired = msg.includes('Error opening input file') ||
-                         msg.includes('Input/output error') ||
-                         msg.includes('exited with code 251') ||
-                         msg.includes('exited with code 403');
+    // 注意 ffmpeg 原文是 "Error opening input files"（复数），HTTP 层会报 404
+    const isUrlExpired = /error opening input files?/i.test(msg) ||
+                         /input\/output error/i.test(msg) ||
+                         /\b404\b/.test(msg) ||
+                         /exited with code (251|403)/.test(msg);
 
     let delay;
     if (isUrlExpired) {
@@ -433,8 +465,9 @@ class StreamManager {
       clearTimeout(this._notifyTimer);
       this._notifyTimer = null;
     }
-    this.ffmpeg.stop();
+    const stopped = this.ffmpeg.stop();
     this.process = null;
+    return stopped; // Promise：FFmpeg 进程真正退出后 resolve（优雅关闭时 await 用）
   }
 
   stop() {
@@ -443,7 +476,7 @@ class StreamManager {
       clearTimeout(this._pendingTimer);
       this._pendingTimer = null;
     }
-    this.stopStreaming();
+    return this.stopStreaming();
   }
 }
 

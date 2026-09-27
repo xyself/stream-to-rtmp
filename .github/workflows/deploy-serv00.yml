@@ -38,14 +38,16 @@ jobs:
             pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null || break
             sleep 2
           done
-          echo ">> 拉新代码（本地改动 stash 保护）..."
-          git stash push -m "auto-deploy" || true
-          git pull --ff-only origin main
-          git stash pop || echo "WARN: stash pop 有冲突，请手动检查 git 状态"
+          echo ">> 拉新代码（强制同步到 origin/main，处理 dev->main 这类分支切换）..."
+          git fetch origin main
+          git reset --hard origin/main
+          git checkout -B main origin/main
           echo ">> 安装依赖..."
           npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund
           echo ">> 重启看门循环..."
-          nohup ./scripts/auto-start.sh >/dev/null 2>&1 &
+          rm -f .stopped
+          # 注意 </dev/null：stdin 不重定向时 ssh 会话会卡住不退出
+          nohup ./scripts/auto-start.sh </dev/null >/dev/null 2>&1 &
           for i in $(seq 1 10); do
             pgrep -f "domains/stream-to-rtmp/main.js" >/dev/null && break
             sleep 2
@@ -54,7 +56,7 @@ jobs:
             echo "DEPLOY_OK"
           else
             echo "DEPLOY_FAIL"
-            tail -n 30 logs/auto-start.log || true
+            tail -n 30 logs/app.log || true
             exit 1
           fi
           DEPLOYEOF

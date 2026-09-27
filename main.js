@@ -30,6 +30,10 @@ const defaultBot = require('./src/bot');
 const gistSync = require('./src/db/gist-sync');
 
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
+
+// 看门脚本约定的特殊退出码：42 = 环境缺失（FFmpeg 不可用），看门遇到 42 不再重启
+const EXIT_MISSING_FFMPEG = 42;
 
 
 
@@ -79,10 +83,17 @@ function createApp({
 
 
 
+    // 等待所有推流任务真正退出（SIGINT -> 等待进程退出 -> 10 秒兜底）
+    // stopAll 返回 Promise：等每个 FFmpeg 进程退出或超时
     if (scheduler && typeof scheduler.stopAll === 'function') {
-
-      scheduler.stopAll();
-
+      try {
+        await Promise.race([
+          scheduler.stopAll(),
+          new Promise((resolve) => setTimeout(resolve, 12000)),
+        ]);
+      } catch (err) {
+        logger.error('❌ 停止任务失败:', err.message);
+      }
     }
 
 
@@ -128,8 +139,8 @@ function createApp({
     logger.log('✅ 系统已全面退出。');
 
     // 不立即调用 process.exit()，让事件循环自然排空
-    // 兜底：2 秒后强制退出（unref 使其不阻止自然退出）
-    setTimeout(() => processRef.exit?.(0), 2000).unref();
+    // 兜底：5 秒后强制退出（unref 使其不阻止自然退出）
+    setTimeout(() => processRef.exit?.(0), 5000).unref();
 
   }
 
@@ -147,21 +158,92 @@ function createApp({
     const bindHost = process.env.BIND_HOST || '127.0.0.1';
     const dashboardToken = process.env.DASHBOARD_TOKEN || '';
 
-    // 面板鉴权：配置了 DASHBOARD_TOKEN 后，面板与数据 API 需要 ?token=xxx
+    // 对外监听但没配 token：直接拒绝启动（避免面板裸奔）
+    const isLocalBind = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
+    if (!isLocalBind && !dashboardToken) {
+      logger.error('❌ BIND_HOST 对外开放但未配置 DASHBOARD_TOKEN：为安全起见拒绝启动，请配置 DASHBOARD_TOKEN 或改回 127.0.0.1');
+      processRef.exit?.(1);
+      return;
+    }
+
+    // 面板鉴权：配置了 DASHBOARD_TOKEN 后，数据 API 需要 Authorization: Bearer <token> 请求头
+    // （面板页面本身仍可用 ?token=xxx 打开：浏览器直接访问页面时无法自定义请求头）
     function checkDashboardAuth(req, res, next) {
       if (!dashboardToken) return next();
-      const provided = String(req.query.token || '');
+      const header = String(req.headers.authorization || '');
+      const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+      const provided = bearer || String(req.query.token || '');
       const a = Buffer.from(provided);
       const b = Buffer.from(dashboardToken);
-      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+      if (a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
       res.status(401).json({ error: 'unauthorized' });
     }
+
+    // 基础安全头
+    app.use((req, res, next) => {
+      res.setHeader('X-Frame-Options', 'DENY');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      next();
+    });
+
+    // /api/* 简易限流：单 IP 每分钟最多 120 次，防误刷/爬虫打爆接口
+    const rateBuckets = new Map();
+    const apiRateLimit = (req, res, next) => {
+      const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+      const now = Date.now();
+      let bucket = rateBuckets.get(ip);
+      if (!bucket || now - bucket.start > 60000) {
+        bucket = { start: now, count: 0 };
+        rateBuckets.set(ip, bucket);
+      }
+      bucket.count += 1;
+      if (bucket.count > 120) return res.status(429).json({ error: 'too many requests' });
+      next();
+    };
+    setInterval(() => {
+      const now = Date.now();
+      for (const [ip, bucket] of rateBuckets) {
+        if (now - bucket.start > 120000) rateBuckets.delete(ip);
+      }
+    }, 120000).unref();
+    app.use('/api/', apiRateLimit);
 
     // 1. 健康检查接口（容器健康检查用，保持公开）
 
     app.get('/health', (req, res) => {
 
       res.json({ status: 'ok', uptime: process.uptime() });
+
+    });
+
+
+
+    // 1b. 任务级健康检查（需要鉴权，给外部监控用）：
+    // 有监控任务、运行超过 2 分钟、但一路推流都没有 -> 返回 503 degraded
+    app.get('/healthz', checkDashboardAuth, (req, res) => {
+
+      const stats = (typeof scheduler.getStats === 'function') ? scheduler.getStats() : {};
+
+      const activeStreams = stats.activeStreams || 0;
+
+      const totalMonitoring = stats.totalMonitoring || 0;
+
+      const healthy = !(totalMonitoring > 0 && activeStreams === 0 && process.uptime() > 120);
+
+      res.status(healthy ? 200 : 503).json({
+
+        status: healthy ? 'ok' : 'degraded',
+
+        uptime: process.uptime(),
+
+        activeStreams,
+
+        totalMonitoring,
+
+        enabledTasks: stats.enabledTasks || 0,
+
+      });
 
     });
 
@@ -208,9 +290,8 @@ function createApp({
         totalMonitoring: stats.totalMonitoring || 0,
         totalBitrate: Math.round(totalBitrate),
 
+        // 隐私白名单：只暴露运营指标，不返回房间号 / 主播名 / 标题
         tasks: trafficStats.map((task) => ({
-
-          roomId: task.room_id,
 
           platform: task.platform,
 
@@ -224,7 +305,6 @@ function createApp({
 
           lastSuccessAt: task.traffic?.lastSuccessAt,
           startedAt: task.traffic?.startedAt,
-          roomInfo: task.traffic?.roomInfo,
         })),
 
       });
@@ -238,6 +318,8 @@ function createApp({
       logger.log(`🌐 Web 面板及健康检查服务已启动，监听: ${bindHost}:${port}`);
       if (!dashboardToken) {
         logger.log('⚠️ 未配置 DASHBOARD_TOKEN，面板无鉴权（仅建议本机访问）');
+      } else if (dashboardToken.length < 16) {
+        logger.log('⚠️ DASHBOARD_TOKEN 过短（<16 位），建议换成更长的随机字符串');
       }
 
     });
@@ -247,7 +329,20 @@ function createApp({
 
 
   async function bootstrap() {
-    
+
+    // 启动资源守门：FFmpeg 必须可用，否则看门会无限重启一个起不来的进程
+    const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    try {
+      const probe = spawnSync(ffmpegPath, ['-version'], { timeout: 10000 });
+      if (probe.status !== 0 || probe.error) {
+        throw new Error(probe.error?.message || `退出码 ${probe.status}`);
+      }
+    } catch (err) {
+      logger.error(`❌ FFmpeg 不可用 (${ffmpegPath}): ${err.message}，请安装 FFmpeg 或设置 FFMPEG_PATH 后重试`);
+      processRef.exit?.(EXIT_MISSING_FFMPEG);
+      return;
+    }
+
     await restoreOnce();
 
     logger.log('🚀 正在初始化直播转播系统 (grammY 版)...');

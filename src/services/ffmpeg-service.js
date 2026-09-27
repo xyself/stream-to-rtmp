@@ -28,7 +28,6 @@ class FFmpegService {
     this.ffmpegCommand = null;
     this.stoppedManually = false;
     this.streamUrl = null;
-    this.killTimeout = null;
 
     this.trafficStats = {
       sessionBytes: 0,
@@ -96,7 +95,6 @@ class FFmpegService {
     this.stoppedManually = false;
     this.streamUrl = streamUrl;
     this.trafficStats.startedAt = new Date().toISOString();
-    if (this.killTimeout) { clearTimeout(this.killTimeout); this.killTimeout = null; }
 
     const { preInput, postInput } = this.buildInputOptions(streamUrl);
     const outputOpts = this.buildOutputOptions();
@@ -111,7 +109,8 @@ class FFmpegService {
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
     } else {
-      const tee = this.targetUrls.map(t => `[f=flv]${t}`).join('|');
+      // onfail=ignore：一路目标挂了不断整条链，其他路继续推
+      const tee = this.targetUrls.map(t => `[f=flv:onfail=ignore]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
 
@@ -214,18 +213,35 @@ class FFmpegService {
     });
   }
 
+  // 停止 FFmpeg：先 SIGINT 给 5 秒自己收尾，不走再 SIGKILL；
+  // 返回 Promise，进程真正退出（或 10 秒兜底）后 resolve，优雅关闭时 await 用
   stop() {
-    if (this.ffmpegCommand) {
-      this.stoppedManually = true;
-      const cmdRef = this.ffmpegCommand;
-      this.ffmpegCommand = null;
-      cmdRef.kill('SIGINT');
+    if (!this.ffmpegCommand) return Promise.resolve();
+    this.stoppedManually = true;
+    const cmdRef = this.ffmpegCommand;
+    this.ffmpegCommand = null;
 
-      if (this.killTimeout) clearTimeout(this.killTimeout);
-      this.killTimeout = setTimeout(() => {
-        try { cmdRef.kill('SIGKILL'); } catch(e) {}
-      }, 5000);
-    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(killTimer);
+        clearTimeout(waitTimer);
+        resolve();
+      };
+      cmdRef.on('exit', done);
+      try {
+        cmdRef.kill('SIGINT');
+      } catch (e) {
+        done();
+        return;
+      }
+      // SIGKILL 兜底绑在局部变量上，不再存 this.killTimeout：
+      // 之前 start() 里会清掉它，导致上一个进程的 SIGKILL 被取消、僵尸残留
+      const killTimer = setTimeout(() => { try { cmdRef.kill('SIGKILL'); } catch (e) {} }, 5000);
+      const waitTimer = setTimeout(done, 10000);
+    });
   }
 
   parseStderrProgress(line) {

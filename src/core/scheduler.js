@@ -67,22 +67,31 @@ class Scheduler {
       }
     }
 
-    for (const task of enabledTasks) {
-      const taskKey = this.buildTaskKey(task);
-      if (!this.runningManagers.has(taskKey)) {
-        const manager = this.createManager(task);
-        Promise.resolve(manager.start()).catch((err) => {
-          const msg = `任务启动失败: ${err.message}`;
-          if (manager.lastErrorMessage !== msg) {
-            manager.lastErrorMessage = msg;
-            this.onNotify?.({
-              taskId: task.id,
-              type: 'error',
-              message: msg,
-            });
+    // 新任务逐个启动、间隔 2.5 秒错峰：避免重启瞬间 N 个任务同时打平台接口
+    const toStart = enabledTasks.filter((task) => !this.runningManagers.has(this.buildTaskKey(task)));
+    if (toStart.length > 0) {
+      (async () => {
+        for (const task of toStart) {
+          if (this._stopped) return;
+          const taskKey = this.buildTaskKey(task);
+          if (this.runningManagers.has(taskKey)) continue;
+          const manager = this.createManager(task);
+          try {
+            await manager.start();
+          } catch (err) {
+            const msg = `任务启动失败: ${err.message}`;
+            if (manager.lastErrorMessage !== msg) {
+              manager.lastErrorMessage = msg;
+              this.onNotify?.({
+                taskId: task.id,
+                type: 'error',
+                message: msg,
+              });
+            }
           }
-        });
-      }
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+      })().catch(() => {});
     }
   }
 
@@ -142,6 +151,7 @@ class Scheduler {
 
   start(interval = 30000) {
     if (this.timer) return;
+    this._stopped = false;
     this.timer = setInterval(() => this.tick(), interval);
     this.tick();
   }
@@ -150,16 +160,24 @@ class Scheduler {
     this.onNotify = callback;
   }
 
-  stopAll() {
+  // 返回 Promise：等所有 FFmpeg 进程真正退出（或超时）后 resolve，
+  // 优雅关闭时 main.js 会 await 它
+  async stopAll() {
+    this._stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
 
-    for (const manager of this.runningManagers.values()) {
-      manager.stop();
-    }
+    const managers = [...this.runningManagers.values()];
     this.runningManagers.clear();
+    await Promise.all(managers.map((manager) => {
+      try {
+        return manager.stop();
+      } catch {
+        return Promise.resolve();
+      }
+    }));
   }
 }
 

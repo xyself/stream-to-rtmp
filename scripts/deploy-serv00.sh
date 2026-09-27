@@ -13,7 +13,7 @@
 #   6. 安装 cron 看门：每 5 分钟检查一次，进程死了自动拉起
 set -e
 
-APP_DIR="$HOME/apps/stream-to-rtmp"
+APP_DIR="$HOME/domains/stream-to-rtmp"
 REPO_URL="https://github.com/xyself/stream-to-rtmp.git"
 NODE_OPTS="--max-old-space-size=256"
 PROC_PATTERN="stream-to-rtmp/main.js"
@@ -27,6 +27,8 @@ command -v node >/dev/null 2>&1 || die "没找到 node，请先装好 Node.js"
 command -v ffmpeg >/dev/null 2>&1 || die "没找到 ffmpeg，请先装好 ffmpeg"
 command -v git >/dev/null 2>&1 || die "没找到 git"
 command -v crontab >/dev/null 2>&1 || die "没找到 crontab"
+NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+[ "$NODE_MAJOR" -ge 22 ] || die "node 版本过低 ($(node -v))，需要 >= 22"
 log "node: $(node -v)"
 log "ffmpeg: $(ffmpeg -version 2>/dev/null | head -n 1)"
 
@@ -36,7 +38,7 @@ if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" pull --ff-only
 else
   log ">> 克隆代码..."
-  mkdir -p "$HOME/apps"
+  mkdir -p "$HOME/domains"
   git clone "$REPO_URL" "$APP_DIR"
 fi
 cd "$APP_DIR"
@@ -53,15 +55,18 @@ fi
 [ -f .env ] || { log ">> 从模板生成 .env"; cp .env.example .env; }
 
 # 交互式填写：已填则跳过（不用 sed -i，FreeBSD/Linux 通用）
+# 第 4 个参数传 "secret" 时输入不回显（token 类）
 get_val() { grep -E "^$1=" .env | cut -d= -f2-; }
 prompt_if_empty() {
-  key="$1"; prompt="$2"; def="$3"
+  key="$1"; prompt="$2"; def="$3"; secret="$4"
   val="$(get_val "$key")"
   if [ -z "$val" ]; then
     printf '%s' "$prompt"
     [ -n "$def" ] && printf ' [%s]' "$def"
     printf ': '
+    if [ "$secret" = "secret" ]; then stty -echo; fi
     read -r input
+    if [ "$secret" = "secret" ]; then stty echo; printf '\n'; fi
     [ -z "$input" ] && input="$def"
     tmpfile="$(mktemp)"
     grep -vE "^${key}=" .env > "$tmpfile" || true
@@ -70,9 +75,9 @@ prompt_if_empty() {
   fi
 }
 log ">> 填写配置（标'可选'的直接回车跳过）"
-prompt_if_empty "TG_TOKEN" "Telegram Bot Token（必填）" ""
+prompt_if_empty "TG_TOKEN" "Telegram Bot Token（必填）" "" "secret"
 prompt_if_empty "TG_CHAT_ID" "Telegram 数字 ID（必填，多个逗号分隔）" ""
-prompt_if_empty "GIST_TOKEN" "Gist Token（可选，用于同步房间配置）" ""
+prompt_if_empty "GIST_TOKEN" "Gist Token（可选，用于同步房间配置）" "" "secret"
 prompt_if_empty "GIST_ID" "Gist ID（可选）" ""
 prompt_if_empty "FFMPEG_PATH" "ffmpeg 路径（可选，默认用系统 PATH）" ""
 prompt_if_empty "DATABASE_PATH" "数据库路径" "./data/data.db"
@@ -97,6 +102,14 @@ if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
   log ">> 停止旧进程..."
   pkill -f "$PROC_PATTERN" || true
   sleep 3
+fi
+# 日志轮转：app.log 超 50MB 则轮转（只留一代）
+if [ -f logs/app.log ]; then
+  LOG_SIZE=$(stat -f %z logs/app.log 2>/dev/null || stat -c %s logs/app.log 2>/dev/null || echo 0)
+  if [ "$LOG_SIZE" -gt 52428800 ]; then
+    mv -f logs/app.log logs/app.log.1
+    log ">> 日志超 50MB，已轮转"
+  fi
 fi
 log ">> 启动..."
 NODE_OPTIONS="$NODE_OPTS" nohup node "$APP_DIR/main.js" >> logs/app.log 2>&1 &

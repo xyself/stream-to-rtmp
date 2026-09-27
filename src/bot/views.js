@@ -260,9 +260,31 @@ function renderFfmpegParams(tasks) {
   return lines.join('\n');
 }
 
+// 把技术性报错翻译成人话；未知错误原文透出（截断，避免刷屏）
+function humanizeError(message = '') {
+  const msg = String(message);
+  if (/404|error opening input|input\/output error|地址过期|url.*expir/i.test(msg)) {
+    return '取流地址可能已过期，20 秒后自动换新地址重试';
+  }
+  if (/exited with code (187|251)/.test(msg)) {
+    return '平台侧连接抖动断连，正在自动重连…';
+  }
+  if (/exited with code 196/.test(msg)) {
+    return '输出端握手超时，正在重试…';
+  }
+  if (/exited with code 224|broken pipe/i.test(msg)) {
+    return '接收端断开了连接，正在重试…';
+  }
+  if (/限流|rate.?limit|too many requests/i.test(msg)) {
+    return '触发平台限流，正在退避重试…';
+  }
+  return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
+}
+
 module.exports = {
   platformLabel,
   escapeHtml,
+  humanizeError,
   renderTaskList,
   renderRoomList,
   renderTaskDetail,

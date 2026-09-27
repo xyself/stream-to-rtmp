@@ -92,10 +92,6 @@ function renderDashboard() {
     }
     .room-id { color: var(--text-dim); font-size: 0.85rem; }
     
-    .anchor-info { margin-bottom: 20px; }
-    .anchor-name { font-size: 1.25rem; font-weight: 600; margin-bottom: 4px; display: block; }
-    .stream-title { font-size: 0.9rem; color: var(--text-dim); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    
     .stats-grid { 
       display: grid; 
       grid-template-columns: 1fr 1fr; 
@@ -138,6 +134,19 @@ function renderDashboard() {
   </footer>
 
   <script>
+    // HTML 转义：所有拼进 innerHTML 的字符串一律先转义，防 XSS
+    function esc(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // 面板鉴权 token：从页面 URL 的 ?token= 取，调数据 API 时走 Authorization 请求头
+    // （token 不出现在 API 请求的 URL 里，避免进浏览器历史和代理日志）
+    function dashboardToken() {
+      try {
+        return new URLSearchParams(location.search).get('token') || '';
+      } catch { return ''; }
+    }
+
     function formatTime(iso) {
       if (!iso) return '—';
       return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -153,7 +162,14 @@ function renderDashboard() {
 
     async function update() {
       try {
-        const res = await fetch('/api/flow');
+        const token = dashboardToken();
+        const res = await fetch('/api/flow', {
+          headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+        });
+        if (res.status === 401) {
+          document.getElementById('summary').innerHTML = '<span style="color:var(--error)">未授权：请在地址后加上 ?token=xxx 后访问</span>';
+          return;
+        }
         const data = await res.json();
         
         const totalKbps = Math.round(data.totalBitrate || 0);
@@ -161,26 +177,19 @@ function renderDashboard() {
         document.getElementById('summary').innerHTML = 
           '活跃任务: <strong>' + data.active + '</strong> &nbsp; | &nbsp; 总带宽: <strong>' + totalMbps + ' Mbps</strong>';
         
-        const tasksHtml = (data.tasks || []).map(t => {
+        const tasksHtml = (data.tasks || []).map((t, i) => {
           const kbps = Math.round(t.bitrateKbps || 0);
           const isRunning = kbps > 0 || t.startedAt;
           const isOffline = t.status !== 'ENABLED' || (!isRunning);
           const cls = isOffline ? 'card offline' : 'card';
-          
-          const info = t.roomInfo || {};
-          const host = info.hostName || '未知主播';
-          const title = info.roomName || '无标题';
 
+          // 隐私：面板不展示房间号 / 主播名 / 标题，只显示匿名编号 + 平台
           return \`
             <li class="\${cls}">
               <div class="status-badge"></div>
               <div class="card-header">
-                <span class="platform-tag">\${t.platform}</span>
-                <span class="room-id">#\${t.room_id}</span>
-              </div>
-              <div class="anchor-info">
-                <span class="anchor-name">\${host}</span>
-                <span class="stream-title" title="\${title}">\${title}</span>
+                <span class="platform-tag">\${esc(t.platform)}</span>
+                <span class="room-id">任务 #\${i + 1}</span>
               </div>
               <div class="stats-grid">
                 <div class="stat-item">
