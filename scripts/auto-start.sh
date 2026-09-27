@@ -4,7 +4,7 @@
 #
 # 约定：
 #   - 退出码 0：正常退出，不再重启
-#   - 退出码 42：环境缺失（FFmpeg 不可用 / node 版本过低），不再重启
+#   - 退出码 42：环境缺失（FFmpeg 不可用 / 找不到 node），不再重启
 #   - .stopped 文件存在：手动停机标记，不再重启
 #     （手动停机：touch .stopped && pkill -f auto-start.sh；重新启用：rm .stopped 后再起本脚本）
 #   - 60 秒内崩溃 5 次：放弃重启，避免无限崩溃循环烧 CPU
@@ -13,15 +13,17 @@
 
 cd "$(dirname "$0")/.."
 
-# ---- 0. node 版本检查（package.json engines 要求 >=22）----
+# ---- 0. node 版本检查 ----
+# 只警告不硬退出：serv00 的 node 版本由平台决定，硬拒绝会导致部署后服务起不来；
+# 只有完全找不到 node 时才退出 42（看门不再重启）。
 if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: 没找到 node" >&2
   exit 42
 fi
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+case "$NODE_MAJOR" in ''|*[!0-9]*) NODE_MAJOR=0 ;; esac
 if [ "$NODE_MAJOR" -lt 22 ]; then
-  echo "ERROR: node 版本过低 ($(node -v))，需要 >= 22" >&2
-  exit 42
+  echo "WARNING: node 版本为 v$NODE_MAJOR（package.json 建议 >= 22），尝试继续启动…" >&2
 fi
 
 # ---- 1. 单实例锁（mkdir 原子操作，FreeBSD/Linux 通用）----
