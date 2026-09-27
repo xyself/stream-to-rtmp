@@ -95,8 +95,26 @@ class Scheduler {
     }
   }
 
-  getStats() {
-    const tasks = db.getAllTasks();
+  // 每日小结：聚合各任务的当日推流统计
+  getDigestStats() {
+    const list = [];
+    for (const manager of this.runningManagers.values()) {
+      if (typeof manager.getDailyStats === 'function') {
+        list.push(manager.getDailyStats());
+      }
+    }
+    return list;
+  }
+
+  resetDigestStats() {
+    for (const manager of this.runningManagers.values()) {
+      if (typeof manager.resetDailyStats === 'function') {
+        manager.resetDailyStats();
+      }
+    }
+  }
+
+  getStats() {    const tasks = db.getAllTasks();
     const enabledTasks = tasks.filter((task) => task.status === 'ENABLED').length;
     const totalTargets = tasks.reduce((sum, task) => sum + ((Array.isArray(task.targets) && task.targets.length > 0) ? task.targets.length : 0), 0);
     let activeStreams = 0;

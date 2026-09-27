@@ -390,16 +390,17 @@ defaultBot.pendingNotifications = [];
 
 defaultBot.handleManagerNotification = function(notification) {
   const { taskId, type, message } = notification;
-  const task = db.getTaskById(taskId);
-  if (!task) return;
+  const task = taskId ? db.getTaskById(taskId) : null;
+  if (taskId && !task) return;
   if (!isNotificationEnabled(type)) return;
 
   // 告警去重：
-  // - error / ffmpeg_error：同任务同类型 10 分钟内只发一次
+  // - error / ffmpeg_error / 监控告警类：同任务同类型 10 分钟内只发一次
   //   （之前按整条消息原文比对，ffmpeg 报错里带变化的 stderr 从未命中，等于没去重）
   // - 状态变化类（开播/下播/结束）：沿用整条消息比对，避免漏掉真实的状态翻转
-  const key = `${taskId}-${type}`;
-  if (type === 'error' || type === 'ffmpeg_error') {
+  const alertTypes = ['error', 'ffmpeg_error', 'output_failed', 'black_screen', 'bitrate_drop', 'failover', 'resource'];
+  const key = `${taskId || 'global'}-${type}`;
+  if (alertTypes.includes(type)) {
     const now = Date.now();
     if (!this._lastNotifiedAt) this._lastNotifiedAt = {};
     if (now - (this._lastNotifiedAt[key] || 0) < 10 * 60 * 1000) return;
@@ -410,7 +411,7 @@ defaultBot.handleManagerNotification = function(notification) {
     this._lastNotified[key] = message;
   }
 
-  const label = `${views.platformLabel(task.platform)} #${task.room_id}`;
+  const label = task ? `${views.platformLabel(task.platform)} #${task.room_id}` : '系统';
   const friendly = (type === 'error' || type === 'ffmpeg_error') ? views.humanizeError(message) : message;
   let text = '';
   switch (type) {
@@ -419,6 +420,11 @@ defaultBot.handleManagerNotification = function(notification) {
     case 'stream_ended':  text = `🔴 ${label}\n💬 ${message}`; break;
     case 'error':         text = `⚠️ ${label}\n💬 ${friendly}`; break;
     case 'ffmpeg_error':  text = `❌ ${label}\n💬 ${friendly}`; break;
+    case 'output_failed': text = `🔌 ${label}\n💬 ${message}`; break;
+    case 'black_screen':  text = `⬛ ${label}\n💬 ${message}`; break;
+    case 'bitrate_drop':  text = `📉 ${label}\n💬 ${message}`; break;
+    case 'failover':      text = `🔀 ${label}\n💬 ${message}`; break;
+    case 'resource':      text = `💾 ${label}\n💬 ${message}`; break;
     default: return;
   }
 

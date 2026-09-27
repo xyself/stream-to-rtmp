@@ -15,6 +15,16 @@ function withJitter(delay, ratio = 0.2) {
   return Math.round(delay - delta + Math.random() * delta * 2);
 }
 
+// 脱敏：只保留协议+主机名，路径（含推流密钥）打码；用于日志与通知
+function maskHost(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}/***`;
+  } catch {
+    return '***';
+  }
+}
+
 function resolveTargetUrls(task) {
   if (Array.isArray(task.targets) && task.targets.length > 0) {
     return task.targets.map((target) => target.target_url).filter(Boolean);
@@ -89,7 +99,10 @@ class PollPolicy {
   nextDelay(reason) {
     if (reason === STREAM_ENDED_MESSAGE) {
       this.streamEndedAttempts += 1;
-      return withJitter(this.streamEndedDelay);
+      // 下播后快轮询加期限：前 10 次 30 秒（约 5 分钟），之后退回常规间隔，
+      // 避免整晚高频骚扰平台接口（又浪费又招风控）
+      const delay = this.streamEndedAttempts <= 10 ? this.streamEndedDelay : this.notLiveDelay;
+      return withJitter(delay);
     }
 
     this.notLiveAttempts += 1;
@@ -109,7 +122,13 @@ class StreamManager {
     this.room = rooms.create(task.platform, task.room_id, this.roomOptions);
     this.targetUrls = resolveTargetUrls(task);
     this.retryPolicy = new RetryPolicy(task.retryPolicy);
-    this.pollPolicy = new PollPolicy(task.pollPolicy);
+    // 开播轮询按平台分开：斗鱼默认 45 秒（接口松），B站保持 120 秒（防风控）；
+    // 用户在任务里显式配了 notLiveDelay 则以用户配置为准
+    const pollCfg = { ...(task.pollPolicy || {}) };
+    if (task.platform === 'douyu' && pollCfg.notLiveDelay === undefined) {
+      pollCfg.notLiveDelay = 45000;
+    }
+    this.pollPolicy = new PollPolicy(pollCfg);
     this.onNotify = onNotify;
     this.lastNotifyType = null;
     this._pendingTimer = null;
@@ -120,6 +139,19 @@ class StreamManager {
     this.errorCount = 0;
     this.lastSuccessAt = null;
     this.consecutiveStreamFailures = 0; // 连续推流侧失败次数（熔断用；"未开播"不算）
+
+    // 备用源流线路（B站多 CDN；单线路平台为空）
+    this.backupUrls = [];
+    // 码率下跌告警：本会话码率峰值做基线
+    this.bitratePeak = 0;
+    this.lowBitrateTicks = 0;
+    // 黑帧检测：每 8 次 tick（约 4 分钟）检测一次
+    this.blackCheckCountdown = 8;
+    this.lastBlackAlertAt = 0;
+
+    // 每日统计（每日小结用；小结推送后清零）
+    this.dailyLiveSeconds = 0;
+    this.dailyDrops = 0;
 
     // 流量统计相关
     this.trafficStats = {
@@ -188,6 +220,15 @@ class StreamManager {
         if (this.isStopping) return;
         this.handleFfmpegError(err.message);
       },
+      onOutputFailed: (targetUrl, reason) => {
+        // 多路输出中某一路目标断开：tee 的 onfail=ignore 会默默跳过，这里补一条告警
+        if (this.isStopping) return;
+        this.onNotify({
+          taskId: this.task.id,
+          type: 'output_failed',
+          message: `推流目标断开: ${maskHost(targetUrl)}，其他线路继续推流中`,
+        });
+      },
       onEnd: () => {
         if (this.isStopping) return;
         this.handleStreamEnded();
@@ -200,9 +241,10 @@ class StreamManager {
   async start() {
     this.isStopping = false;
 
-    let streamUrl;
+    let urls;
     try {
-      streamUrl = await this.room.getStreamUrl();
+      // 一次取流拿到全部可用线路：主线路在前，备用线路留作故障切换
+      urls = await this.room.getStreamUrls();
     } catch (err) {
       if (this.isStopping) return;
       this.handleRoomError(err.message);
@@ -210,6 +252,11 @@ class StreamManager {
     }
 
     if (this.isStopping) return;
+    const streamUrl = urls[0];
+    this.backupUrls = urls.slice(1);
+    // 新会话：码率基线清零
+    this.bitratePeak = 0;
+    this.lowBitrateTicks = 0;
     this.currentStreamUrl = streamUrl;
     this.process = this.ffmpeg.start(streamUrl);
     this.trafficStats.lastRefreshAt = new Date().toISOString();
@@ -289,6 +336,7 @@ class StreamManager {
       if (this.freezeCount >= 4) { // 连续 4 次 tick (约 2 分钟)
         this.freezeCount = 0;
         this.handleFfmpegError('检测到画面冻结 (Bitrate 0)，正在自动重启...');
+        return;
       }
     } else {
       this.freezeCount = 0;
@@ -296,6 +344,37 @@ class StreamManager {
         this.lastNotifyType = 'running';
         this.lastErrorMessage = null;
       }
+    }
+
+    // 每日统计：推流秒数累加（tick 每 30 秒一次）
+    this.dailyLiveSeconds += 30;
+
+    // 码率下跌告警：运行 5 分钟后，以本会话峰值为基线，
+    // 码率跌到峰值一半以下连续 3 次 tick（约 90 秒）则告警（源站限速/网络抖动）
+    if (runtime > 300000 && stats.bitrateKbps > 0) {
+      this.bitratePeak = Math.max(this.bitratePeak || 0, stats.bitrateKbps);
+      if (this.bitratePeak > 500 && stats.bitrateKbps < this.bitratePeak * 0.5) {
+        this.lowBitrateTicks += 1;
+        if (this.lowBitrateTicks >= 3 && this.lastNotifyType !== 'bitrate_drop') {
+          this.lastNotifyType = 'bitrate_drop';
+          this.onNotify({
+            taskId: this.task.id,
+            type: 'bitrate_drop',
+            message: `码率大幅下跌: ${Math.round(this.bitratePeak)}k → ${Math.round(stats.bitrateKbps)}k（峰值一半以下持续约 90 秒），可能是源站限速或网络抖动`,
+          });
+        }
+      } else {
+        this.lowBitrateTicks = 0;
+        if (this.lastNotifyType === 'bitrate_drop') this.lastNotifyType = 'running';
+      }
+    }
+
+    // 黑帧检测：每 8 次 tick（约 4 分钟）抽查一次，连续黑屏 3 秒以上告警
+    // （有些假死码率不为 0：定格末帧、纯黑屏但有音频，冻结检测抓不到）
+    this.blackCheckCountdown -= 1;
+    if (this.blackCheckCountdown <= 0 && runtime > 120000) {
+      this.blackCheckCountdown = 8;
+      this.checkBlackFrame().catch(() => {});
     }
 
     // 每 5 分钟强制检查一次平台侧的开播状态，防止主播下播但流未断开（某些平台的轮播机制）
@@ -309,6 +388,44 @@ class StreamManager {
         console.error(`[${this.task.room_id}] 平台状态检查失败:`, err.message);
       });
     }
+  }
+
+  // 黑帧抽查：拉 6 秒流看是否连续黑屏 3 秒以上；1 小时内只告警一次
+  async checkBlackFrame() {
+    if (this.isStopping || !this.currentStreamUrl) return;
+    let isBlack = false;
+    try {
+      isBlack = await this.ffmpeg.detectBlackFrame(this.currentStreamUrl, { seconds: 6 });
+    } catch (err) {
+      return; // 检测失败不告警（源流抖动时拉不到 6 秒很常见）
+    }
+    if (this.isStopping) return;
+    if (isBlack && Date.now() - this.lastBlackAlertAt > 3600000) {
+      this.lastBlackAlertAt = Date.now();
+      this.onNotify({
+        taskId: this.task.id,
+        type: 'black_screen',
+        message: `画面疑似黑屏（连续 3 秒以上黑帧），推流仍在继续，请抽查确认`,
+      });
+    }
+  }
+
+  // 每日小结用统计
+  getDailyStats() {
+    return {
+      taskId: this.task.id,
+      platform: this.task.platform,
+      roomId: this.task.room_id,
+      liveMinutes: Math.round(this.dailyLiveSeconds / 60),
+      drops: this.dailyDrops,
+      bytes: this.trafficStats.totalBytes + (this.ffmpeg?.getTrafficStats().sessionBytes || 0),
+      running: !!this.ffmpeg?.getTrafficStats().running,
+    };
+  }
+
+  resetDailyStats() {
+    this.dailyLiveSeconds = 0;
+    this.dailyDrops = 0;
   }
 
   enableStats() {
@@ -387,7 +504,24 @@ class StreamManager {
     }
   }
 
-  handleFfmpegError(msg) {
+  async handleFfmpegError(msg) {
+    // 先验播：FFmpeg 报错时先查平台真实开播状态。
+    // 下播时源流无数据→输出空转→接收端掐连接（224 broken pipe 等），
+    // 本质是"正常结束"不是故障，直接走下播流程，不发误报
+    try {
+      const info = await this.room.getInfo();
+      if (this.isStopping) return;
+      if (info && info.isLive === false) {
+        console.log(`[${this.task.room_id}] 平台显示已下播，FFmpeg 报错按正常结束处理`);
+        this.handleStreamEnded();
+        return;
+      }
+    } catch (err) {
+      // 平台查不到（接口挂/风控）：按原流程走，宁可误报、不可漏报
+      if (this.isStopping) return;
+      console.error(`[${this.task.room_id}] 下播预检失败，按故障处理:`, err.message);
+    }
+
     this.errorCount += 1;
     this.consecutiveStreamFailures += 1;
     this.saveSessionStats();
@@ -427,11 +561,37 @@ class StreamManager {
     if (isUrlExpired) {
       delay = 20000; // URL 过期：20 秒后重新获取新 URL
       this.retryPolicy.reset(); // 重置重试计数
+    } else if (this.tryFailover(msg)) {
+      return; // 已切换到备用线路，立即重推，不走退避
     } else {
       delay = this.retryPolicy.nextDelay();
     }
 
+    this.dailyDrops += 1; // 记一次断流（每日小结用；备用线路切换不算断流）
     this.scheduleStart(delay);
+  }
+
+  // 备用线路切换：输入侧故障（非 URL 过期类）且有备用线路时，立即换线路重推
+  // 返回 true = 已切换，调用方直接 return
+  tryFailover(msg) {
+    if (!this.backupUrls || this.backupUrls.length === 0) return false;
+    const isInputError = /error opening input|input\/output error|connection (reset|refused|timed out)|http error|failed to resolve|server returned/i.test(msg);
+    if (!isInputError) return false;
+
+    const backupUrl = this.backupUrls.shift();
+    console.log(`[${this.task.room_id}] 输入线路故障，切换备用线路: ${maskHost(backupUrl)}（剩余 ${this.backupUrls.length} 条）`);
+    // 切换线路不算连续失败：避免"主线路坏+切线路"被误计入熔断
+    this.consecutiveStreamFailures = 0;
+    this.bitratePeak = 0;
+    this.lowBitrateTicks = 0;
+    this.currentStreamUrl = backupUrl;
+    this.process = this.ffmpeg.start(backupUrl);
+    this.onNotify({
+      taskId: this.task.id,
+      type: 'failover',
+      message: `输入线路故障，已自动切换到备用线路继续推流`,
+    });
+    return true;
   }
 
   handleStreamEnded() {

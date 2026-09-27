@@ -50,7 +50,8 @@ class BilibiliEngine {
     return { hostName, roomName, isLive, realId, cover };
   }
 
-  async getStreamUrl(roomId, options = {}) {
+  // 返回同一场直播的全部可用 CDN 线路（主线路在前），供故障时自动切换备用流
+  async getStreamUrls(roomId, options = {}) {
     try {
       const info = await this.getInfo(roomId, options);
       if (!info.isLive) throw new Error('主播尚未开播');
@@ -72,20 +73,38 @@ class BilibiliEngine {
       const playurl = res.data.data?.playurl_info?.playurl;
       if (!playurl) throw new Error('未获取到播放地址（可能暂无可用线路）');
 
+      const urls = [];
+      const seen = new Set();
+      const pushUrl = (u) => { if (u && !seen.has(u)) { seen.add(u); urls.push(u); } };
+
+      // 优先 flv 格式下每个 codec 的全部 CDN 线路
       for (const stream of playurl.stream) {
         const flvFormat = stream.format.find((f) => f.format_name === 'flv');
         if (flvFormat) {
-          const codec = flvFormat.codec[0];
-          const hostInfo = codec.url_info[0];
-          return hostInfo.host + codec.base_url + hostInfo.extra;
+          for (const codec of flvFormat.codec || []) {
+            for (const urlInfo of codec.url_info || []) {
+              pushUrl(urlInfo.host + codec.base_url + urlInfo.extra);
+            }
+          }
         }
       }
 
-      const firstCodec = playurl.stream[0].format[0].codec[0];
-      return firstCodec.url_info[0].host + firstCodec.base_url + firstCodec.url_info[0].extra;
+      // 兜底：其他格式的第一条（保持与老逻辑一致）
+      if (urls.length === 0) {
+        const firstCodec = playurl.stream[0].format[0].codec[0];
+        pushUrl(firstCodec.url_info[0].host + firstCodec.base_url + firstCodec.url_info[0].extra);
+      }
+
+      if (urls.length === 0) throw new Error('未获取到播放地址（可能暂无可用线路）');
+      return urls;
     } catch (err) {
       throw new Error(`B站解析失败: ${err.message}`);
     }
+  }
+
+  async getStreamUrl(roomId, options = {}) {
+    const urls = await this.getStreamUrls(roomId, options);
+    return urls[0];
   }
 
   getOptions(roomId) {

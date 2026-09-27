@@ -389,6 +389,14 @@ function createApp({
 
       logger.log('⚙️ 任务调度器：已启动');
 
+      // 后台杂务：每日推流小结 + 内存/磁盘水位告警
+      try {
+        require('./src/core/housekeeping').startHousekeeping({ scheduler, bot });
+        logger.log('🧹 后台杂务（每日小结/资源水位）：已启动');
+      } catch (err) {
+        logger.error('后台杂务启动失败:', err.message);
+      }
+
       // 每次用户触发 DB 写操作后，延迟 30 秒同步到 Gist（防抖）
 
       if (gistSync.isConfigured()) {
