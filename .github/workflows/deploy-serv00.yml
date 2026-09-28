@@ -33,7 +33,9 @@ jobs:
           cd "$APP_DIR"
           echo ">> 停止旧进程（看门循环 + node，SIGTERM 优雅退出）..."
           # 注意：node 是以相对路径 "node main.js" 启动的，pgrep -f 必须匹配实际命令行
-          pkill -f "stream-to-rtmp/scripts/auto-start.sh" || true
+          # 看门可能是相对路径 ./scripts/auto-start.sh 启动的，用 [a] 写法匹配所有启动方式
+          #（方括号防 pkill 匹配到命令自身；heredoc 经 stdin 传递，不在 argv 里，无需担心误杀）
+          pkill -f "[a]uto-start.sh" || true
           pkill -f "node main.js" || true
           for i in $(seq 1 15); do
             pgrep -f "node main.js" >/dev/null || break
@@ -61,3 +63,4 @@ jobs:
             exit 1
           fi
           DEPLOYEOF
+
