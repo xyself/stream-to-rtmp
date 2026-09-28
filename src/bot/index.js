@@ -236,9 +236,21 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   bot.callbackQuery(/^tstatus:(\d+)/, async (ctx) => {
+    const task = db.getTaskById(ctx.match[1]);
+    if (!task) { await ctx.answerCallbackQuery('房间不存在'); return; }
+    await ctx.answerCallbackQuery('正在加载…');
+    // 点进详情时刷一下该房间信息，保证封面/标题最新（最多等 3 秒）
+    try {
+      const manager = scheduler.getTaskManager?.(task);
+      if (manager?.refreshRoomInfo) {
+        await Promise.race([
+          manager.refreshRoomInfo(),
+          new Promise((resolve) => setTimeout(resolve, 3000)),
+        ]);
+      }
+    } catch (err) { /* 刷新失败就用缓存数据 */ }
     const entry = scheduler.getTrafficStats().find((s) => String(s.id) === ctx.match[1]);
-    if (!entry) { await ctx.answerCallbackQuery('房间不存在'); return; }
-    await ctx.answerCallbackQuery();
+    if (!entry) { await ctx.reply('房间不存在'); return; }
     const statusText = views.renderDetailedStatus([entry]);
     const roomInfo = entry.traffic?.roomInfo || {};
     const backKb = new InlineKeyboard().text('⬅️ 返回房间列表', 'tstatus_back');
