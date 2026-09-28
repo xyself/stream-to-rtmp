@@ -6,6 +6,7 @@ class Scheduler {
     this.runningManagers = new Map();
     this.timer = null;
     this.onNotify = onNotify;
+    this.bootGraceUntil = 0; // #18：启动后 90 秒静默期，不补"已下播/直播结束"类播报
   }
 
   buildTaskKey(task) {
@@ -21,7 +22,10 @@ class Scheduler {
   }
 
   createManager(task) {
-    const manager = new StreamManager(task, { onNotify: this.onNotify });
+    const manager = new StreamManager(task, {
+      onNotify: this.onNotify,
+      isBootGrace: () => Date.now() < this.bootGraceUntil,
+    });
     this.runningManagers.set(this.buildTaskKey(task), manager);
     return manager;
   }
@@ -170,6 +174,7 @@ class Scheduler {
   start(interval = 30000) {
     if (this.timer) return;
     this._stopped = false;
+    this.bootGraceUntil = Date.now() + 90000; // #18：启动后 90 秒静默期
     this.timer = setInterval(() => this.tick(), interval);
     this.tick();
   }

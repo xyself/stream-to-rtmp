@@ -1,6 +1,7 @@
 const db = require('../db');
 const rooms = require('../platforms');
 const FFmpegService = require('../services/ffmpeg-service');
+const views = require('../bot/views');
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36';
 const NOT_LIVE_MESSAGE = '主播尚未开播';
@@ -116,8 +117,9 @@ class PollPolicy {
 }
 
 class StreamManager {
-  constructor(task, { onNotify = () => {} } = {}) {
+  constructor(task, { onNotify = () => {}, isBootGrace = null } = {}) {
     this.task = task;
+    this.isBootGrace = isBootGrace; // 启动静默期（#18）：刚重启时不补"已下播"类播报
     this.roomOptions = resolveRoomOptions(task);
     this.room = rooms.create(task.platform, task.room_id, this.roomOptions);
     this.targetUrls = resolveTargetUrls(task);
@@ -142,6 +144,9 @@ class StreamManager {
 
     // 备用源流线路（B站多 CDN；单线路平台为空）
     this.backupUrls = [];
+    this.primaryUrl = null; // 本次取流的主线路地址（自动切回用）
+    this.failbackCountdown = 20; // 在备用线路上每 20 次 tick（约 10 分钟）探测一次主线路
+    this._failbackProbing = false;
     // 码率下跌告警：本会话码率峰值做基线
     this.bitratePeak = 0;
     this.lowBitrateTicks = 0;
@@ -152,6 +157,11 @@ class StreamManager {
     // 每日统计（每日小结用；小结推送后清零）
     this.dailyLiveSeconds = 0;
     this.dailyDrops = 0;
+    // 本场统计（下播小结用；每次 start 清零）
+    this.sessionDrops = 0;
+
+    // 恢复通知追踪：告警类型 -> 首次告警时间戳；恢复时推送"本次中断 X 分钟"（#1）
+    this.recoverTrack = {};
 
     // 流量统计相关
     this.trafficStats = {
@@ -204,12 +214,21 @@ class StreamManager {
                 : '';
 
               // 下播后开播 vs 报错后恢复，文案区分开
-              const liveMsg = wasOffline ? '🟢 开播了！正在推流中...' : '🟢 推流恢复了，正在推流中...';
+              // #1：报错后恢复带上中断时长；#5：截图失败时用房间封面兜底
+              let recoverSuffix = '';
+              if (wasError) {
+                const minutes = this.popRecoverMinutes('ffmpeg_error') ?? this.popRecoverMinutes('error');
+                if (minutes !== null) {
+                  recoverSuffix = `（本次中断约 ${this.formatInterruptMinutes(minutes)}）`;
+                }
+              }
+              const liveMsg = wasOffline ? '🟢 开播了！正在推流中...' : `🟢 推流恢复了${recoverSuffix}，正在推流中...`;
               this.onNotify({
                 taskId: this.task.id,
                 type: 'live_start',
                 message: `${liveMsg}${infoLine}`,
                 imageBuffer,
+                coverUrl: this.roomInfo?.cover || null,
               });
               // 发完立刻改状态：60 秒内再重连不会重复发（之后 tick 满 60 秒会置为 running）
               this.lastNotifyType = 'live_start';
@@ -254,9 +273,11 @@ class StreamManager {
     if (this.isStopping) return;
     const streamUrl = urls[0];
     this.backupUrls = urls.slice(1);
-    // 新会话：码率基线清零
+    this.primaryUrl = streamUrl; // 记下主线路（自动切回用）
+    // 新会话：码率基线、本场断流计数清零
     this.bitratePeak = 0;
     this.lowBitrateTicks = 0;
+    this.sessionDrops = 0;
     this.currentStreamUrl = streamUrl;
     this.process = this.ffmpeg.start(streamUrl);
     this.trafficStats.lastRefreshAt = new Date().toISOString();
@@ -357,6 +378,7 @@ class StreamManager {
         this.lowBitrateTicks += 1;
         if (this.lowBitrateTicks >= 3 && this.lastNotifyType !== 'bitrate_drop') {
           this.lastNotifyType = 'bitrate_drop';
+          this.markAlertStart('bitrate_drop'); // #1：记下开始时间
           this.onNotify({
             taskId: this.task.id,
             type: 'bitrate_drop',
@@ -365,8 +387,18 @@ class StreamManager {
         }
       } else {
         this.lowBitrateTicks = 0;
-        if (this.lastNotifyType === 'bitrate_drop') this.lastNotifyType = 'running';
+        if (this.lastNotifyType === 'bitrate_drop') {
+          this.lastNotifyType = 'running';
+          this.notifyRecovered('bitrate_drop', '码率下跌告警'); // #1：码率回来推恢复
+        }
       }
+    }
+
+    // 主线路自动切回（#11）：在备用线路上运行时，定期探测主线路是否恢复
+    this.failbackCountdown -= 1;
+    if (this.failbackCountdown <= 0) {
+      this.failbackCountdown = 20;
+      this.tryFailbackToPrimary().catch(() => {});
     }
 
     // 黑帧检测：每 8 次 tick（约 4 分钟）抽查一次，连续黑屏 3 秒以上告警
@@ -402,12 +434,47 @@ class StreamManager {
     if (this.isStopping) return;
     if (isBlack && Date.now() - this.lastBlackAlertAt > 3600000) {
       this.lastBlackAlertAt = Date.now();
+      this.markAlertStart('black_screen'); // #1：记下开始时间
       this.onNotify({
         taskId: this.task.id,
         type: 'black_screen',
         message: `画面疑似黑屏（连续 3 秒以上黑帧），推流仍在继续，请抽查确认`,
       });
+    } else if (!isBlack) {
+      this.notifyRecovered('black_screen', '黑屏告警'); // #1：画面回来推恢复
     }
+  }
+
+  // 主线路自动切回（#11）：抽帧探测主线路，活了就切回去
+  async tryFailbackToPrimary() {
+    if (this.isStopping || this._failbackProbing) return;
+    if (typeof db.getSetting === 'function' && db.getSetting('auto_failback') === '0') return;
+    const primary = this.primaryUrl;
+    const current = this.currentStreamUrl;
+    if (!primary || !current || primary === current) return;
+    if (!this.ffmpeg?.getTrafficStats().running) return; // 没在推就不用切，下次取流自然回到主线路
+    this._failbackProbing = true;
+    try {
+      await this.ffmpeg.captureFrame(primary, { platform: this.task.platform, timeout: 15000 });
+    } catch (err) {
+      this._failbackProbing = false;
+      return; // 主线路还没好，下次再试
+    }
+    if (this.isStopping) { this._failbackProbing = false; return; }
+    this._failbackProbing = false;
+    console.log(`[${this.task.room_id}] 主线路已恢复，自动切回`);
+    this.stopStreaming();
+    this.consecutiveStreamFailures = 0;
+    this.bitratePeak = 0;
+    this.lowBitrateTicks = 0;
+    this.currentStreamUrl = primary;
+    this.backupUrls = [];
+    this.process = this.ffmpeg.start(primary);
+    this.onNotify({
+      taskId: this.task.id,
+      type: 'failover',
+      message: `主线路已恢复，自动切回主线路继续推流`,
+    });
   }
 
   // 每日小结用统计
@@ -452,11 +519,45 @@ class StreamManager {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  // ---- 恢复通知（#1）：告警时记下开始时间，恢复时推"本次中断 X 分钟" ----
+  markAlertStart(type) {
+    if (!this.recoverTrack[type]) this.recoverTrack[type] = Date.now();
+  }
+
+  // 取出某告警的中断时长（分钟）并清除追踪；没追踪过返回 null
+  popRecoverMinutes(type) {
+    const startedAt = this.recoverTrack[type];
+    if (!startedAt) return null;
+    delete this.recoverTrack[type];
+    return Math.max(1, Math.round((Date.now() - startedAt) / 60000));
+  }
+
+  clearRecoverTrack() {
+    this.recoverTrack = {};
+  }
+
+  formatInterruptMinutes(minutes) {
+    if (minutes >= 60) return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
+    return `${minutes} 分钟`;
+  }
+
+  // 某告警恢复：推一条"✅ …已恢复，本次中断约 X 分钟"
+  notifyRecovered(type, desc) {
+    const minutes = this.popRecoverMinutes(type);
+    if (minutes === null) return;
+    this.onNotify({
+      taskId: this.task.id,
+      type: 'recover',
+      message: `${desc}已恢复，本次中断约 ${this.formatInterruptMinutes(minutes)}`,
+    });
+  }
+
   handleRoomError(msg) {
     this.errorCount += 1;
     this.saveSessionStats();
     this.stopStreaming();
     db.updateError(this.task.id, msg);
+    this.clearRecoverTrack(); // 会话结束，未完成的恢复追踪清掉
 
     // 判断错误类型：扩大未开播关键词覆盖
     const lowerMsg = msg.toLowerCase();
@@ -474,12 +575,15 @@ class StreamManager {
       if (this.lastNotifyType !== 'offline') {
         this.lastNotifyType = 'offline';
         this.lastErrorMessage = null; // 重置错误消息，因为现在是下播状态
-        const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
-        this.onNotify({
-          taskId: this.task.id,
-          type: 'offline',
-          message: `主播${hostLabel}已下播，正在监测中...`,
-        });
+        // #18：刚重启的静默期内不补"已下播"播报（避免每次重启刷一堆）
+        if (!this.isBootGrace?.()) {
+          const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
+          this.onNotify({
+            taskId: this.task.id,
+            type: 'offline',
+            message: `主播${hostLabel}已下播，正在监测中...`,
+          });
+        }
       }
     } else {
       if (this.lastNotifyType !== 'error' || this.lastErrorMessage !== msg) {
@@ -543,6 +647,7 @@ class StreamManager {
     if (this.lastNotifyType !== 'ffmpeg_error' || this.lastErrorMessage !== msg) {
       this.lastNotifyType = 'ffmpeg_error';
       this.lastErrorMessage = msg;
+      this.markAlertStart('ffmpeg_error'); // #1：记下断流开始时间，恢复时算时长
       this.onNotify({
         taskId: this.task.id,
         type: 'ffmpeg_error',
@@ -568,6 +673,7 @@ class StreamManager {
     }
 
     this.dailyDrops += 1; // 记一次断流（每日小结用；备用线路切换不算断流）
+    this.sessionDrops += 1; // 本场断流（下播小结用）
     this.scheduleStart(delay);
   }
 
@@ -614,17 +720,42 @@ class StreamManager {
   }
 
   handleStreamEnded() {
+    // #4 下播小结：先取本场数据（saveSessionStats 之前拿 sessionBytes）
+    const sessBytes = this.ffmpeg?.getTrafficStats().sessionBytes || 0;
+    const durationSec = this._streamStartedAt ? Math.round((Date.now() - this._streamStartedAt) / 1000) : 0;
+    const hadSession = durationSec > 0;
     this.saveSessionStats();
     this.stopStreaming();
     db.updateError(this.task.id, STREAM_ENDED_MESSAGE);
+    this.clearRecoverTrack(); // 会话结束，未完成的恢复追踪清掉
 
     if (this.lastNotifyType !== 'stream_ended') {
       this.lastNotifyType = 'stream_ended';
-      const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
+      // #18：刚重启的静默期内不补"直播结束"播报
+      if (!this.isBootGrace?.()) {
+        const hostLabel = this.roomInfo?.hostName ? ` (${this.roomInfo.hostName})` : '';
+        this.onNotify({
+          taskId: this.task.id,
+          type: 'stream_ended',
+          message: `直播已结束${hostLabel}，等待下一场直播...`,
+        });
+      }
+    }
+
+    // #4：真播过一场才推小结（刚启动就结束/误触发不打扰）
+    if (hadSession) {
       this.onNotify({
         taskId: this.task.id,
-        type: 'stream_ended',
-        message: `直播已结束${hostLabel}，等待下一场直播...`,
+        type: 'session_summary',
+        message: views.renderSessionSummary({
+          platform: this.task.platform,
+          roomId: this.task.room_id,
+          hostName: this.roomInfo?.hostName,
+          durationSec,
+          drops: this.sessionDrops,
+          peakKbps: Math.round(this.bitratePeak || 0),
+          bytes: sessBytes,
+        }),
       });
     }
 

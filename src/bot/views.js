@@ -258,7 +258,21 @@ const NOTIFICATION_TYPES = [
   { key: 'notify_failover',      label: '🔀 线路切换', desc: '切换备用线路时推送' },
   { key: 'notify_resource',      label: '💾 资源告警', desc: '内存/磁盘水位偏高时推送' },
   { key: 'notify_digest',        label: '📊 每日小结', desc: '每天早上 8 点推送推流小结' },
+  { key: 'notify_recover',       label: '✅ 恢复通知', desc: '断流/黑屏/码率告警恢复时推送中断时长' },
+  { key: 'notify_session_summary', label: '📋 下播小结', desc: '下播时自动推送本场时长/断流/峰值码率' },
 ];
+
+// 下播自动推送的本场小结
+function renderSessionSummary({ platform, roomId, hostName, durationSec, drops, peakKbps, bytes } = {}) {
+  const hostLabel = hostName ? `（${escapeHtml(hostName)}）` : '';
+  return [
+    `📋 <b>本场小结</b> ${escapeHtml(platformLabel(platform))} #${escapeHtml(roomId)}${hostLabel}`,
+    `⏱️ 推流时长：${formatUptime(durationSec || 0)}`,
+    `🔌 断流次数：${drops || 0} 次`,
+    `📈 峰值码率：${peakKbps > 0 ? peakKbps + ' kbps' : '无数据'}`,
+    `📊 本场流量：${formatBytes(bytes || 0)}`,
+  ].join('\n');
+}
 
 function renderNotificationSettings(settings = {}) {
   const lines = [
@@ -341,4 +355,5 @@ module.exports = {
   renderNotificationSettings,
   NOTIFICATION_TYPES,
   renderFfmpegParams,
+  renderSessionSummary,
 };

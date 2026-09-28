@@ -113,8 +113,51 @@ async function checkResources(bot) {
 
 function startHousekeeping({ scheduler, bot }) {
   let lastDigestDate = null;
+  let lastNightlyDate = null;
 
-  // 每分钟检查一次：到点发小结
+  async function sendAll(text) {
+    const chatIds = bot.parseAllowedChatId?.();
+    if (!chatIds) return;
+    for (const id of chatIds) {
+      try {
+        await bot.api.sendMessage(id, text);
+      } catch (err) {
+        console.error('定时通知发送失败:', err.message);
+      }
+    }
+  }
+
+  // #14 每天凌晨自动重启推流（防 FFmpeg 内存泄漏；serv00 只有 512MB）
+  async function nightlyRestart(today) {
+    try {
+      if (db.getSetting('nightly_restart') === '0') return; // 用户关掉就跳过
+    } catch (err) { /* 读不到配置就默认执行 */ }
+    const hour = parseInt(db.getSetting('nightly_restart_hour') || '4', 10) || 4;
+    const d = cstNow();
+    if (d.getUTCHours() !== hour || d.getUTCMinutes() >= 5) return;
+    if (lastNightlyDate === today) return;
+    lastNightlyDate = today;
+
+    const managers = [...(scheduler.runningManagers?.values() || [])]
+      .filter((m) => m.ffmpeg?.getTrafficStats().running);
+    if (managers.length === 0) return;
+
+    await sendAll(`🌙 凌晨自动维护：${managers.length} 路推流将逐个重启（防内存泄漏），每路短暂中断…`);
+    let done = 0;
+    for (const m of managers) {
+      try {
+        await scheduler.refreshTask?.(m.task);
+        done += 1;
+      } catch (err) {
+        console.error(`[housekeeping] 凌晨重启 ${m.task?.room_id} 失败:`, err.message);
+      }
+      // 逐个重启、间隔 30 秒错峰，避免同时重连打爆平台接口
+      await new Promise((resolve) => setTimeout(resolve, 30000));
+    }
+    await sendAll(`✅ 凌晨自动维护完成：${done}/${managers.length} 路推流已重启`);
+  }
+
+  // 每分钟检查一次：到点发小结 / 到点凌晨重启
   setInterval(() => {
     try {
       const d = cstNow();
@@ -123,6 +166,7 @@ function startHousekeeping({ scheduler, bot }) {
         lastDigestDate = today;
         sendDailyDigest(scheduler, bot).catch((err) => console.error('每日小结失败:', err.message));
       }
+      nightlyRestart(today).catch((err) => console.error('凌晨重启失败:', err.message));
     } catch (err) {
       console.error('小结定时器异常:', err.message);
     }

@@ -1,6 +1,7 @@
 const { Bot, InlineKeyboard, Keyboard, session, InputFile } = require('grammy');
 const os = require('os');
 const fs = require('fs');
+const path = require('path');
 const db = require('../db');
 const scheduler = require('../core/scheduler');
 const views = require('./views');
@@ -46,6 +47,8 @@ function buildMainKeyboard() {
 
 function buildDashboardKeyboard() {
   const transcodeOn = db.getSetting?.('transcode_video') === '1';
+  const nightlyOn = db.getSetting?.('nightly_restart') !== '0';
+  const failbackOn = db.getSetting?.('auto_failback') !== '0';
   const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
     .text('🛑 全部暂停', 'global_disable_all')
@@ -53,7 +56,11 @@ function buildDashboardKeyboard() {
     .text('🔄 刷新全部', 'global_refresh_all')
     .text('🧹 清理重启', 'global_clean_restart')
     .row()
-    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row();
+    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row()
+    .text(`🌙 凌晨重启: ${nightlyOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_nightly')
+    .text(`🔀 自动切回主线路: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback').row()
+    .text('📩 测试通知', 'global_test_notify')
+    .text('📜 查日志', 'global_view_logs').row();
   keyboard.text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
   return keyboard;
 }
@@ -174,6 +181,8 @@ function isNotificationEnabled(type) {
     bitrate_drop: 'notify_bitrate_drop',
     failover: 'notify_failover',
     resource: 'notify_resource',
+    recover: 'notify_recover',
+    session_summary: 'notify_session_summary',
   };
   const key = keyMap[type];
   if (!key) return true;
@@ -215,6 +224,53 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       recentErrors: getRecentErrors(),
     });
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
+  };
+
+  const refreshDashboard = async (ctx) => {
+    await safeEditMessageText(ctx, views.renderDashboard({
+      system: getSystemInfo(),
+      stats: scheduler.getStats(),
+      recentErrors: getRecentErrors(),
+    }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
+  };
+
+  // #10：TG 里查日志（最近 20 行，URL 脱敏）
+  const readLogLines = ({ onlyErrors = false, limit = 20 } = {}) => {
+    const logPath = path.join(__dirname, '../../logs/app.log');
+    let content = '';
+    try {
+      content = fs.readFileSync(logPath, 'utf8');
+    } catch {
+      return ['日志文件不存在（可能还没产生日志）'];
+    }
+    let lines = content.split('\n').filter((l) => l.trim());
+    if (onlyErrors) {
+      lines = lines.filter((l) => /error|❌|失败|fail|exception|超时|断开|熔断/i.test(l));
+    }
+    return lines.slice(-limit).map((l) =>
+      // 脱敏：URL（含推流密钥）只留 host
+      l.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`]+)/g, (m) => views.maskTargetUrl(m))
+    );
+  };
+
+  const showLogs = async (ctx, edit = false) => {
+    const onlyErrors = ctx.session.logFilter === 'errors';
+    const lines = readLogLines({ onlyErrors });
+    const body = lines.length
+      ? lines.map((l) => views.escapeHtml(l.length > 300 ? l.slice(0, 300) + '…' : l)).join('\n')
+      : '(没有符合条件的日志)';
+    let text = `<b>📜 日志</b>（最近 ${lines.length} 行${onlyErrors ? ' · 只看报错' : ''}）\n<code>${body}</code>`;
+    if (text.length > 4000) text = text.slice(0, 4000) + '…</code>';
+    const kb = new InlineKeyboard()
+      .text('🔄 刷新', 'log_refresh')
+      .text(onlyErrors ? '📜 看全部' : '⚠️ 只看报错', 'log_filter').row()
+      .text('⬅️ 返回面板', 'log_back');
+    const opts = { parse_mode: 'HTML', reply_markup: kb };
+    if (edit) {
+      await safeEditMessageText(ctx, text, opts);
+    } else {
+      await ctx.reply(text, opts);
+    }
   };
 
   const showTraffic = async (ctx) => {
@@ -467,6 +523,51 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   });
 
+  // #14：凌晨自动重启开关
+  bot.callbackQuery('global_toggle_nightly', async (ctx) => {
+    const newValue = db.getSetting('nightly_restart') === '0' ? '1' : '0';
+    db.setSetting('nightly_restart', newValue);
+    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 凌晨自动重启已开启（每天 4 点）' : '⛔ 凌晨自动重启已关闭');
+    await refreshDashboard(ctx);
+  });
+
+  // #11：故障自动切回主线路开关
+  bot.callbackQuery('global_toggle_failback', async (ctx) => {
+    const newValue = db.getSetting('auto_failback') === '0' ? '1' : '0';
+    db.setSetting('auto_failback', newValue);
+    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 已开启：主线路恢复后自动切回' : '⛔ 已关闭：只手动切换');
+    await refreshDashboard(ctx);
+  });
+
+  // #6：测试通知通道
+  bot.callbackQuery('global_test_notify', async (ctx) => {
+    await ctx.answerCallbackQuery('已发送测试通知');
+    const now = new Date().toLocaleString('zh-CN', { hour12: false });
+    await ctx.reply(`📩 <b>测试通知</b>\nTG 通知通道正常 ✅\n🕐 ${now}`, { parse_mode: 'HTML' });
+  });
+
+  // #10：查日志
+  bot.callbackQuery('global_view_logs', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showLogs(ctx);
+  });
+
+  bot.callbackQuery('log_refresh', async (ctx) => {
+    await ctx.answerCallbackQuery('已刷新');
+    await showLogs(ctx, true);
+  });
+
+  bot.callbackQuery('log_filter', async (ctx) => {
+    ctx.session.logFilter = ctx.session.logFilter === 'errors' ? 'all' : 'errors';
+    await ctx.answerCallbackQuery(ctx.session.logFilter === 'errors' ? '只看报错' : '查看全部');
+    await showLogs(ctx, true);
+  });
+
+  bot.callbackQuery('log_back', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showDashboard(ctx);
+  });
+
   roomHandlers.register(bot, sharedDeps);
   rtmpHandlers.register(bot, sharedDeps);
 
@@ -513,6 +614,8 @@ defaultBot.handleManagerNotification = function(notification) {
     case 'bitrate_drop':  text = `📉 ${label}\n💬 ${message}`; break;
     case 'failover':      text = `🔀 ${label}\n💬 ${message}`; break;
     case 'resource':      text = `💾 ${label}\n💬 ${message}`; break;
+    case 'recover':       text = `✅ ${label}\n💬 ${message}`; break;
+    case 'session_summary': text = message; break; // 本场小结自带 HTML 排版
     default: return;
   }
 
@@ -521,14 +624,26 @@ defaultBot.handleManagerNotification = function(notification) {
 
   // 报错类通知带一键干预按钮：立即重试 / 暂停任务 / 查看详情
   const alertKeyboard = (type === 'error' || type === 'ffmpeg_error') ? buildAlertKeyboard(taskId) : undefined;
+  // 本场小结自带 HTML 排版，其他类型保持纯文本（报错原文可能含尖括号，转 HTML 会炸）
+  const useHtml = type === 'session_summary';
 
   const sendToAll = async () => {
     for (const chatId of chatIds) {
       try {
         if (type === 'live_start' && notification.imageBuffer) {
           await this.api.sendPhoto(chatId, new InputFile(notification.imageBuffer, `live_${task.room_id}.jpg`), { caption: text });
+        } else if (type === 'live_start' && notification.coverUrl) {
+          // #5：截图失败时用房间封面兜底，实在发不出再降级纯文字
+          try {
+            await this.api.sendPhoto(chatId, notification.coverUrl, { caption: text });
+          } catch {
+            await this.api.sendMessage(chatId, text);
+          }
         } else {
-          await this.api.sendMessage(chatId, text, alertKeyboard ? { reply_markup: alertKeyboard } : undefined);
+          await this.api.sendMessage(chatId, text, {
+            ...(useHtml ? { parse_mode: 'HTML' } : {}),
+            ...(alertKeyboard ? { reply_markup: alertKeyboard } : {}),
+          });
         }
       } catch (err) {
         console.error(`发送 Telegram 通知失败 (chat: ${chatId}):`, err.message);
