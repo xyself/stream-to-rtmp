@@ -491,8 +491,11 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   });
 
   bot.callbackQuery('global_clean_restart', async (ctx) => {
-    scheduler.stopAll();
-    await scheduler.tick?.();
+    // 先停掉所有推流+调度器，再用 start() 重建：stopAll() 会把 _stopped 置 true 并清掉定时器，
+    // 直接调 tick() 的话启动循环第一行就 return，推流永远拉不起来（2026-09-28 修）。
+    // start() 会清掉 _stopped、重建 30 秒定时器、走 90 秒静默期后逐个错峰拉起。
+    await scheduler.stopAll();
+    scheduler.start();
     await ctx.answerCallbackQuery('已清理并重启所有任务');
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   });
@@ -685,4 +688,5 @@ module.exports.buildNotificationKeyboard = buildNotificationKeyboard;
 module.exports.buildAlertKeyboard = buildAlertKeyboard;
 module.exports.registerBotCommands = registerBotCommands;
 module.exports.saveRoomTask = roomHandlers.saveRoomTask;
+
 
