@@ -235,15 +235,30 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   // #10：TG 里查日志（最近 20 行，URL 脱敏）
+  // 只读文件末尾 64KB：app.log 最大 50MB，整文件 readFileSync 会堵死事件循环导致按钮卡死
   const readLogLines = ({ onlyErrors = false, limit = 20 } = {}) => {
     const logPath = path.join(__dirname, '../../logs/app.log');
-    let content = '';
+    const TAIL_BYTES = 64 * 1024;
+    let tail = '';
+    let truncated = false;
     try {
-      content = fs.readFileSync(logPath, 'utf8');
+      const size = fs.statSync(logPath).size;
+      truncated = size > TAIL_BYTES;
+      const start = truncated ? size - TAIL_BYTES : 0;
+      const len = truncated ? TAIL_BYTES : size;
+      const fd = fs.openSync(logPath, 'r');
+      try {
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, start);
+        tail = buf.toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch {
       return ['日志文件不存在（可能还没产生日志）'];
     }
-    let lines = content.split('\n').filter((l) => l.trim());
+    let lines = tail.split('\n').filter((l) => l.trim());
+    if (truncated) lines = lines.slice(1); // 丢掉第一行（可能是被截断的半行）
     if (onlyErrors) {
       lines = lines.filter((l) => /error|❌|失败|fail|exception|超时|断开|熔断/i.test(l));
     }
@@ -670,3 +685,4 @@ module.exports.buildNotificationKeyboard = buildNotificationKeyboard;
 module.exports.buildAlertKeyboard = buildAlertKeyboard;
 module.exports.registerBotCommands = registerBotCommands;
 module.exports.saveRoomTask = roomHandlers.saveRoomTask;
+
