@@ -225,14 +225,55 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   const showStatus = async (ctx) => {
+    // 先刷一遍房间信息，保证封面最新（最多等 3 秒）
+    try {
+      await Promise.race([
+        scheduler.refreshAllRoomInfo(),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    } catch (err) {}
+
     const stats = scheduler.getTrafficStats();
     if (stats.length === 0) {
       return await ctx.reply('当前还没有配置房间');
     }
-    await ctx.reply(views.renderStatusList(stats), {
-      parse_mode: 'HTML',
-      reply_markup: buildStatusListKeyboard(stats),
-    });
+
+    // 有封面的房间：一间一条图文消息，标题紧凑，按钮进详情
+    const noCover = [];
+    for (const entry of stats) {
+      const cover = entry.traffic?.roomInfo?.cover;
+      if (!cover) { noCover.push(entry); continue; }
+
+      const running = entry.traffic?.running;
+      const kbps = Math.round(entry.traffic?.bitrateKbps || 0);
+      const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
+      const stateLine = entry.status !== 'ENABLED' ? '已暂停'
+        : running ? `推流中${kbps > 0 ? ` · ${kbps} kbps` : ''}`
+        : '待机 / 等待开播';
+      const caption =
+        `${icon} <b>${views.escapeHtml(views.platformLabel(entry.platform))} #${views.escapeHtml(entry.room_id)}</b>\n${stateLine}`;
+      // 添加时间戳防止 TG 缓存旧封面
+      const coverUrl = cover.includes('?')
+        ? `${cover}&t=${Date.now()}`
+        : `${cover}?t=${Date.now()}`;
+      try {
+        await ctx.replyWithPhoto(coverUrl, {
+          caption,
+          parse_mode: 'HTML',
+          reply_markup: new InlineKeyboard().text('📺 查看详情', `tstatus:${entry.id}`),
+        });
+      } catch (err) {
+        noCover.push(entry); // 图发不出就进文字列表
+      }
+    }
+
+    // 没封面的房间：一条文字列表兜底
+    if (noCover.length > 0) {
+      await ctx.reply(views.renderStatusList(noCover), {
+        parse_mode: 'HTML',
+        reply_markup: buildStatusListKeyboard(noCover),
+      });
+    }
   };
 
   bot.callbackQuery(/^tstatus:(\d+)/, async (ctx) => {
