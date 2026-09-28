@@ -522,6 +522,21 @@ module.exports = { createApp };
 
 if (require.main === module) {
 
+  // 日志每行加北京时间戳：TG 面板"查日志"看报错时能分辨新旧（2026-09-28 用户反馈无时间戳会记错）
+  // 在入口统一包装 console，覆盖所有模块的 console 调用；仅真实运行时生效，测试 import 不受影响
+  const fmtTs = () => {
+    const p = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(Date.now()).reduce((o, x) => ((o[x.type] = x.value), o), {});
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+  };
+  for (const m of ['log', 'info', 'warn', 'error', 'debug']) {
+    const orig = console[m].bind(console);
+    console[m] = (...args) => orig(`[${fmtTs()}]`, ...args);
+  }
+
   const app = createApp();
 
   app.bootstrap();
