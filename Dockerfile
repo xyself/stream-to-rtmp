@@ -1,4 +1,4 @@
-FROM node:25-alpine
+FROM node:26-alpine
 
 # 安装 FFmpeg（Alpine 使用 apk）；tzdata 用于容器时区
 RUN apk add --no-cache ffmpeg tzdata
