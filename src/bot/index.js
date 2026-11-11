@@ -9,6 +9,7 @@ const { parseAllowedChatId, resetAllSessions } = require('./utils/parser');
 const roomHandlers = require('./handlers/room');
 const rtmpHandlers = require('./handlers/rtmp');
 const gistSync = require('../db/gist-sync');
+const widgetHelper = require('./widget');
 
 async function safeEditMessageText(ctx, text, options) {
   try {
@@ -145,11 +146,13 @@ function getSystemInfo() {
     dbSize = views.formatBytes(stat.size);
   } catch {}
   
+  const memPct = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
   return {
     cpuPercent,
     cpuBar: views.progressBar(cpuPercent),
     memUsed: views.formatBytes(usedMem),
     memTotal: views.formatBytes(totalMem),
+    memPct,
     serviceMem: views.formatBytes(serviceMem),
     uptime: views.formatUptime(process.uptime()),
     dbSize,
@@ -200,6 +203,7 @@ async function registerBotCommands(bot) {
     { command: 'addroom', description: '添加新的直播房间' },
     { command: 'status', description: '推流健康监控面板' },
     { command: 'notify', description: '管理通知设置' },
+    { command: 'widget', description: '📊 实时监控 Widget（Bot API 10.4）' },
   ]);
 }
 
@@ -406,6 +410,89 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   bot.command('notify', showNotificationSettings);
   bot.command('traffic', showTraffic);
 
+  // ─── Bot API 10.4 Widget ───────────────────────────────────────────────────
+  // /widget 命令：发送 Widget，优雅降级到普通面板
+  bot.command('widget', async (ctx) => {
+    const system = getSystemInfo();
+    const tasks = scheduler.getTrafficStats();
+    const chatData = widgetHelper.buildChatData({ tasks, system });
+    try {
+      const sent = await widgetHelper.sendWidget(bot, ctx.chat.id, chatData);
+      // 记录 message_id，供定时推送 editMessageWidgetData
+      const msgId = sent?.result?.message_id ?? sent?.message_id;
+      if (msgId) {
+        bot._widgetMessages = bot._widgetMessages || {};
+        bot._widgetMessages[String(ctx.chat.id)] = msgId;
+      }
+    } catch (err) {
+      // 降级：老客户端 / 未支持 10.4 → 发普通面板
+      const isUnsupported = /not supported|unknown method|method not found|400/i.test(err?.message || '');
+      if (isUnsupported) {
+        await ctx.reply(
+          '⚠️ 当前 Telegram 客户端不支持 Widget（需 10.4+）\n\n' +
+          views.renderDashboard({ system, stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
+          { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+        );
+      } else {
+        console.error('[widget] sendWidget 失败:', err.message);
+        await ctx.reply(`❌ Widget 发送失败: ${err.message}`);
+      }
+    }
+  });
+
+  // widget_query：用户在 Widget 里点了按钮
+  bot.on('widget_query', async (ctx) => {
+    const query = ctx.update?.widget_query;
+    if (!query) return;
+    const queryId = query.id;
+    let parsed = {};
+    try { parsed = JSON.parse(query.data || '{}'); } catch {}
+
+    const { i: taskId, a: action } = parsed;
+
+    if (action === 'tog') {
+      // 切换任务开启/暂停
+      const task = taskId ? db.getTaskById(String(taskId)) : null;
+      if (!task) {
+        await widgetHelper.answerWidgetQuery(bot, queryId, '任务不存在').catch(() => {});
+        return;
+      }
+      const newStatus = task.status === 'ENABLED' ? 'DISABLED' : 'ENABLED';
+      db.updateTaskStatus(task.id, newStatus);
+      await scheduler.tick?.();
+      await widgetHelper.answerWidgetQuery(bot, queryId,
+        newStatus === 'ENABLED' ? `▶ 已开启 ${views.platformLabel(task.platform)} #${task.room_id}` : `■ 已停止 ${views.platformLabel(task.platform)} #${task.room_id}`
+      ).catch(() => {});
+      // 推送更新后的 chat_data
+      await _pushWidgetUpdate(ctx.chat?.id).catch(() => {});
+    } else if (action === 'snap') {
+      // 截图
+      const task = taskId ? db.getTaskById(String(taskId)) : null;
+      if (!task) {
+        await widgetHelper.answerWidgetQuery(bot, queryId, '任务不存在').catch(() => {});
+        return;
+      }
+      const manager = scheduler.getTaskManager?.(task);
+      if (!manager) {
+        await widgetHelper.answerWidgetQuery(bot, queryId, '当前未推流，无法截图').catch(() => {});
+        return;
+      }
+      await widgetHelper.answerWidgetQuery(bot, queryId, '📷 正在截图...').catch(() => {});
+      try {
+        const imageBuffer = await manager.captureSnapshot();
+        await bot.api.sendPhoto(
+          ctx.chat.id,
+          new InputFile(imageBuffer, `snap_${task.room_id}.jpg`),
+          { caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 当前画面` }
+        );
+      } catch (err) {
+        await bot.api.sendMessage(ctx.chat.id, `截图失败: ${err.message}`).catch(() => {});
+      }
+    } else {
+      await widgetHelper.answerWidgetQuery(bot, queryId, '').catch(() => {});
+    }
+  });
+
   bot.hears('📺 管理面板', showDashboard);
   bot.hears('📊 推流状态', showStatus);
   bot.hears('🛠️ FFmpeg 参数', async (ctx) => {
@@ -598,6 +685,28 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   roomHandlers.register(bot, sharedDeps);
   rtmpHandlers.register(bot, sharedDeps);
+
+  // ─── Widget 定时推送辅助 ───────────────────────────────────────────────────
+  // 供 widget_query handler 和外部定时器调用：向已打开的 Widget 推送最新数据
+  async function _pushWidgetUpdate(chatId) {
+    if (!chatId) return;
+    const msgId = bot._widgetMessages?.[String(chatId)];
+    if (!msgId) return;
+    const system = getSystemInfo();
+    const tasks = scheduler.getTrafficStats();
+    const chatData = widgetHelper.buildChatData({ tasks, system });
+    try {
+      await widgetHelper.editWidgetData(bot, chatId, msgId, chatData);
+    } catch (err) {
+      // message_id 失效（消息已删除）→ 清理记录
+      if (/message.*not found|bad request/i.test(err?.message || '')) {
+        delete bot._widgetMessages[String(chatId)];
+      }
+    }
+  }
+  // 暴露给外部（如 housekeeping 定时器）
+  bot._pushWidgetUpdate = _pushWidgetUpdate;
+  bot._widgetMessages = {};
 
   return bot;
 }

@@ -205,6 +205,16 @@ function startHousekeeping({ scheduler, bot, onRestart }) {
   }, 5 * 60000);
   // 启动 30 秒后先查一次
   setTimeout(() => checkResources(bot).catch(() => {}), 30000);
+
+  // Bot API 10.4：每 60 秒向所有打开的 Widget 推送最新数据
+  if (typeof bot._pushWidgetUpdate === 'function') {
+    setInterval(() => {
+      const widgetMsgs = bot._widgetMessages || {};
+      for (const chatId of Object.keys(widgetMsgs)) {
+        bot._pushWidgetUpdate(chatId).catch(() => {});
+      }
+    }, 60000);
+  }
 }
 
 module.exports = { startHousekeeping };
