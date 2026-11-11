@@ -196,15 +196,23 @@ function isNotificationEnabled(type) {
 
 async function registerBotCommands(bot) {
   if (!bot?.api?.setMyCommands) return;
-  await bot.api.setMyCommands([
-    { command: 'start', description: '打开直播转播控制中心' },
-    { command: 'panel', description: '查看管理面板' },
-    { command: 'rooms', description: '查看房间列表' },
-    { command: 'addroom', description: '添加新的直播房间' },
-    { command: 'status', description: '推流健康监控面板' },
-    { command: 'notify', description: '管理通知设置' },
-    { command: 'widget', description: '📊 实时监控 Widget（Bot API 10.4）' },
-  ]);
+
+  const commands = [
+    { command: 'start',   description: '🚀 打开控制中心主菜单' },
+    { command: 'widget',  description: '📊 实时监控 Widget（Bot API 10.4）' },
+    { command: 'status',  description: '📺 推流状态 & 房间详情' },
+    { command: 'panel',   description: '⚙️ 全局控制台（开关/重启/Gist）' },
+    { command: 'rooms',   description: '🏠 房间列表管理' },
+    { command: 'addroom', description: '➕ 添加新直播房间' },
+    { command: 'notify',  description: '🔔 通知开关设置' },
+    { command: 'logs',    description: '📜 查看最近日志' },
+    { command: 'traffic', description: '📈 流量 & 码率统计' },
+  ];
+
+  // 私聊命令列表（完整）
+  await bot.api.setMyCommands(commands, { scope: { type: 'all_private_chats' } });
+  // 默认兜底（老客户端）
+  await bot.api.setMyCommands(commands);
 }
 
 function createRelayBot(token = process.env.TG_TOKEN) {
@@ -409,6 +417,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   bot.command('status', showStatus);
   bot.command('notify', showNotificationSettings);
   bot.command('traffic', showTraffic);
+  bot.command('logs', async (ctx) => { await showLogs(ctx); });
 
   // ─── Bot API 10.4 Widget ───────────────────────────────────────────────────
   // /widget 命令：发送 Widget，优雅降级到普通面板
@@ -516,12 +525,33 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     });
   });
 
+  // Bot API 10.4：ephemeral 回复辅助（只有点按钮的用户可见，不刷屏）
+  // 若旧客户端不支持则降级到普通 answerCallbackQuery
+  async function ephemeralReply(ctx, text) {
+    try {
+      await bot.api.raw.sendMessage({
+        chat_id: ctx.chat.id,
+        text,
+        callback_query_id: ctx.callbackQuery?.id,
+      });
+    } catch (err) {
+      // 旧客户端不认识 callback_query_id 参数，降级
+      if (/bad request|unknown field/i.test(err?.message || '')) {
+        await ctx.reply(text).catch(() => {});
+      }
+    }
+    await ctx.answerCallbackQuery().catch(() => {});
+  }
+
   bot.callbackQuery(/^alert_retry:(.+)/, async (ctx) => {
     const task = db.getTaskById(ctx.match[1]);
     if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
     await ctx.answerCallbackQuery('正在重试…');
-    try { await scheduler.refreshTask?.(task); } catch (err) {
-      await ctx.reply(`重试失败: ${err.message}`);
+    try {
+      await scheduler.refreshTask?.(task);
+      await ephemeralReply(ctx, `✅ 已触发重试：${views.platformLabel(task.platform)} #${task.room_id}`);
+    } catch (err) {
+      await ephemeralReply(ctx, `❌ 重试失败: ${err.message}`);
     }
   });
 
@@ -531,6 +561,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     db.updateTaskStatus(task.id, 'DISABLED');
     await scheduler.tick?.();
     await ctx.answerCallbackQuery('已暂停该任务');
+    await ephemeralReply(ctx, `⏸️ 已暂停：${views.platformLabel(task.platform)} #${task.room_id}`);
   });
 
   bot.callbackQuery(/^alert_detail:(.+)/, async (ctx) => {
