@@ -71,7 +71,7 @@ function createApp({
 
 
 
-  async function gracefulShutdown(signal) {
+  async function gracefulShutdown(signal, exitCode = 0) {
 
     if (shuttingDown) return;
 
@@ -139,8 +139,8 @@ function createApp({
     logger.log('✅ 系统已全面退出。');
 
     // 不立即调用 process.exit()，让事件循环自然排空
-    // 兜底：5 秒后强制退出（unref 使其不阻止自然退出）
-    setTimeout(() => processRef.exit?.(0), 5000).unref();
+    // 兜底：强制退出（unref 使其不阻止自然退出）
+    setTimeout(() => processRef.exit?.(exitCode), 1500).unref();
 
   }
 
@@ -389,10 +389,14 @@ function createApp({
 
       logger.log('⚙️ 任务调度器：已启动');
 
-      // 后台杂务：每日推流小结 + 内存/磁盘水位告警
+      // 后台杂务：每日推流小结 + 内存/磁盘水位告警 + 凌晨滚动重启
       try {
-        require('./src/core/housekeeping').startHousekeeping({ scheduler, bot });
-        logger.log('🧹 后台杂务（每日小结/资源水位）：已启动');
+        require('./src/core/housekeeping').startHousekeeping({
+          scheduler,
+          bot,
+          onRestart: () => gracefulShutdown('NIGHTLY_RESTART', 100),
+        });
+        logger.log('🧹 后台杂务（每日小结/资源水位/凌晨维护）：已启动');
       } catch (err) {
         logger.error('后台杂务启动失败:', err.message);
       }

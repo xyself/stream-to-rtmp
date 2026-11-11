@@ -202,11 +202,17 @@ class StreamManager {
             }
 
             if (shouldNotifyLive) {
+              const liveNotifyEnabled = db.getSetting?.('notify_live_start') !== '0';
+              // 优化内存：默认优先使用官方房间封面（零内存/零软解开销）；用户显式开启 live_snapshot=1 才执行 FFmpeg 实况截图
+              const snapshotEnabled = db.getSetting?.('live_snapshot') === '1';
               let imageBuffer = null;
-              try {
-                imageBuffer = await this.captureSnapshot();
-              } catch (err) {
-                console.error(`[${this.task.room_id}] 截图失败:`, err.message);
+
+              if (liveNotifyEnabled && snapshotEnabled) {
+                try {
+                  imageBuffer = await this.captureSnapshot();
+                } catch (err) {
+                  console.error(`[${this.task.room_id}] 截图失败:`, err.message);
+                }
               }
 
               const infoLine = this.roomInfo?.hostName

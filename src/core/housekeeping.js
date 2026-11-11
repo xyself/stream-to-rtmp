@@ -88,6 +88,11 @@ function getDiskUsePct() {
 let lastResourceAlertAt = 0;
 
 async function checkResources(bot) {
+  // 定期被动清理 SQLite WAL 映射，释放共享内存页面
+  try {
+    db.checkpoint?.('PASSIVE');
+  } catch {}
+
   const problems = [];
   const memMB = await getTotalMemMB();
   if (memMB !== null && memMB >= MEM_ALERT_MB) {
@@ -111,7 +116,7 @@ async function checkResources(bot) {
   }
 }
 
-function startHousekeeping({ scheduler, bot }) {
+function startHousekeeping({ scheduler, bot, onRestart }) {
   let lastDigestDate = null;
   let lastNightlyDate = null;
 
@@ -127,7 +132,7 @@ function startHousekeeping({ scheduler, bot }) {
     }
   }
 
-  // #14 每天凌晨自动重启推流（防 FFmpeg 内存泄漏；serv00 只有 512MB）
+  // #14 每天凌晨自动维护（重启 Node / 推流，彻底释放内存；serv00 只有 512MB）
   async function nightlyRestart(today) {
     try {
       if (db.getSetting('nightly_restart') === '0') return; // 用户关掉就跳过
@@ -140,9 +145,24 @@ function startHousekeeping({ scheduler, bot }) {
 
     const managers = [...(scheduler.runningManagers?.values() || [])]
       .filter((m) => m.ffmpeg?.getTrafficStats().running);
-    if (managers.length === 0) return;
 
-    await sendAll(`🌙 凌晨自动维护：${managers.length} 路推流将逐个重启（防内存泄漏），每路短暂中断…`);
+    const streamDesc = managers.length > 0 ? `（当前 ${managers.length} 路推流一并重置）` : '';
+    await sendAll(`🌙 凌晨自动维护：系统正在执行滚动重启以彻底重置内存${streamDesc}，预计 3~5 秒内自动拉起恢复…`);
+
+    // 重启前截断清理 SQLite WAL 映射
+    try {
+      db.checkpoint?.('TRUNCATE');
+    } catch {}
+
+    // 留出 2 秒让 Telegram 通知网络请求发完
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    if (typeof onRestart === 'function') {
+      onRestart();
+      return;
+    }
+
+    // 兜底：如果未传入 onRestart，逐个重启推流
     let done = 0;
     for (const m of managers) {
       try {

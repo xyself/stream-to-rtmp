@@ -49,6 +49,7 @@ function buildDashboardKeyboard() {
   const transcodeOn = db.getSetting?.('transcode_video') === '1';
   const nightlyOn = db.getSetting?.('nightly_restart') !== '0';
   const failbackOn = db.getSetting?.('auto_failback') !== '0';
+  const liveSnapshotOn = db.getSetting?.('live_snapshot') === '1';
   const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
     .text('🛑 全部暂停', 'global_disable_all')
@@ -59,6 +60,7 @@ function buildDashboardKeyboard() {
     .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row()
     .text(`🌙 凌晨重启: ${nightlyOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_nightly')
     .text(`🔀 自动切回主线路: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback').row()
+    .text(`📷 开播截图: ${liveSnapshotOn ? '✅ 开启' : '⚪ 关闭(省内存)'}`, 'global_toggle_live_snapshot').row()
     .text('📩 测试通知', 'global_test_notify')
     .text('📜 查日志', 'global_view_logs').row();
   keyboard.text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
@@ -554,6 +556,14 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     const newValue = db.getSetting('auto_failback') === '0' ? '1' : '0';
     db.setSetting('auto_failback', newValue);
     await ctx.answerCallbackQuery(newValue === '1' ? '✅ 已开启：主线路恢复后自动切回' : '⛔ 已关闭：只手动切换');
+    await refreshDashboard(ctx);
+  });
+
+  // 内存优化：开播实况截图开关（关则直接复用房间封面，零内存开销）
+  bot.callbackQuery('global_toggle_live_snapshot', async (ctx) => {
+    const newValue = db.getSetting('live_snapshot') === '1' ? '0' : '1';
+    db.setSetting('live_snapshot', newValue);
+    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 已开启：开播时执行 FFmpeg 实况截图' : '⚪ 已关闭：开播时优先使用房间封面（节省内存）');
     await refreshDashboard(ctx);
   });
 

@@ -81,6 +81,15 @@ while true; do
     break
   fi
 
+  # 退出码 100：计划内维护滚动重启（重置内存），重置崩溃计数并秒级拉起
+  if [ "$EXIT_CODE" -eq 100 ]; then
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') 计划内维护滚动重启，正在重新拉起..." >> "$LOG_FILE"
+    CRASH_COUNT=0
+    WINDOW_START=$(date +%s)
+    sleep 2
+    continue
+  fi
+
   # 崩溃计数：60 秒窗口内超 5 次则放弃
   NOW=$(date +%s)
   if [ $((NOW - WINDOW_START)) -gt 60 ]; then

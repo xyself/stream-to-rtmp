@@ -248,7 +248,7 @@ function renderDetailedStatus(tasks = []) {
 }
 
 const NOTIFICATION_TYPES = [
-  { key: 'notify_live_start',   label: '🟢 开播通知', desc: '主播开播时推送截图' },
+  { key: 'notify_live_start',   label: '🟢 开播通知', desc: '主播开播时推送封面或实况' },
   { key: 'notify_stream_ended', label: '🔴 关播通知', desc: '直播结束时推送' },
   { key: 'notify_ffmpeg_error', label: '⚠️ 断流通知', desc: 'FFmpeg 推流出错时推送' },
   { key: 'notify_offline',      label: '📌 下播通知', desc: '房间下播 / 未开播时推送' },

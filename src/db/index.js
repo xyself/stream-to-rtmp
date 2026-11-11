@@ -517,6 +517,16 @@ function createStore(filePath = resolveDatabasePath()) {
       _onWrite?.();
     },
 
+    checkpoint(mode = 'PASSIVE') {
+      try {
+        const validModes = ['PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'];
+        const targetMode = validModes.includes(mode) ? mode : 'PASSIVE';
+        database.exec(`PRAGMA wal_checkpoint(${targetMode});`);
+      } catch (err) {
+        console.error('SQLite WAL checkpoint 失败:', err.message);
+      }
+    },
+
     close() {
       try {
         database.exec('PRAGMA wal_checkpoint(TRUNCATE);');
