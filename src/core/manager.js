@@ -422,7 +422,7 @@ class StreamManager {
       this.tryFailbackToPrimary().catch(() => {});
     }
 
-    // 黑帧检测：每 8 次 tick（约 4 分钟）抽查一次，连续黑屏 3 秒以上告警
+    // 黑帧检测：每 8 次 tick（约 4 分钟）抽查一次，连续黑屏 15 秒以上告警
     // （有些假死码率不为 0：定格末帧、纯黑屏但有音频，冻结检测抓不到）
     this.blackCheckCountdown -= 1;
     if (this.blackCheckCountdown <= 0 && runtime > 120000) {
@@ -443,14 +443,14 @@ class StreamManager {
     }
   }
 
-  // 黑帧抽查：拉 6 秒流看是否连续黑屏 3 秒以上；1 小时内只告警一次
+  // 黑帧抽查：拉 20 秒流看是否连续黑屏 15 秒以上；1 小时内只告警一次
   async checkBlackFrame() {
     if (this.isStopping || !this.currentStreamUrl) return;
     let isBlack = false;
     try {
-      isBlack = await this.ffmpeg.detectBlackFrame(this.currentStreamUrl, { seconds: 6 });
+      isBlack = await this.ffmpeg.detectBlackFrame(this.currentStreamUrl, { seconds: 20, duration: 15 });
     } catch (err) {
-      return; // 检测失败不告警（源流抖动时拉不到 6 秒很常见）
+      return; // 检测失败不告警（源流抖动时拉不到指定时长很常见）
     }
     if (this.isStopping) return;
     if (isBlack && Date.now() - this.lastBlackAlertAt > 3600000) {
@@ -459,7 +459,7 @@ class StreamManager {
       this.onNotify({
         taskId: this.task.id,
         type: 'black_screen',
-        message: `画面疑似黑屏（连续 3 秒以上黑帧），推流仍在继续，请抽查确认`,
+        message: `画面疑似黑屏（连续 15 秒以上黑帧），推流仍在继续，请抽查确认`,
       });
     } else if (!isBlack) {
       this.notifyRecovered('black_screen', '黑屏告警'); // #1：画面回来推恢复

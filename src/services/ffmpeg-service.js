@@ -293,7 +293,8 @@ class FFmpegService {
   // 返回 true = 疑似黑屏；false = 画面正常；抛错 = 检测失败（不告警）
   async detectBlackFrame(streamUrl, options = {}) {
     if (!streamUrl) throw new Error('流地址不可用');
-    const analyzeSeconds = options.seconds || 6;
+    const analyzeSeconds = options.seconds || 20;
+    const blackDuration = options.duration || 15;
     const timeout = (analyzeSeconds + 20) * 1000;
 
     return new Promise((resolve, reject) => {
@@ -311,10 +312,10 @@ class FFmpegService {
         preInput.push('-headers', headerString);
       }
 
-      // blackdetect=d=3：连续 3 秒黑帧才算；pix_th=0.10：亮度低于 10% 视为黑
+      // 连续 15 秒黑帧才判定为事故级黑屏，排除正常游戏读图/转场；pix_th=0.10：亮度低于 10% 视为黑
       const args = [
         ...preInput, '-i', streamUrl,
-        '-vf', 'blackdetect=d=3:pix_th=0.10',
+        '-vf', `blackdetect=d=${blackDuration}:pix_th=0.10`,
         '-an', '-t', String(analyzeSeconds),
         '-f', 'null', '-',
       ];
