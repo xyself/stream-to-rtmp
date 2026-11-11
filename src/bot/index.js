@@ -441,7 +441,9 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   });
 
   // widget_query：用户在 Widget 里点了按钮
-  bot.on('widget_query', async (ctx) => {
+  // grammy 1.42 类型白名单不含 widget_query，用 bot.use 手动分发
+  bot.use(async (ctx, next) => {
+    if (!ctx.update?.widget_query) return next();
     const query = ctx.update?.widget_query;
     if (!query) return;
     const queryId = query.id;
@@ -491,7 +493,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     } else {
       await widgetHelper.answerWidgetQuery(bot, queryId, '').catch(() => {});
     }
-  });
+  }); // end bot.use widget_query
 
   bot.hears('📺 管理面板', showDashboard);
   bot.hears('📊 推流状态', showStatus);
