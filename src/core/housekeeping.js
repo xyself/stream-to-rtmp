@@ -93,6 +93,13 @@ async function checkResources(bot) {
     db.checkpoint?.('PASSIVE');
   } catch {}
 
+  // 主动尝试触发 V8 垃圾回收，将长期运行碎片归还系统
+  if (typeof global.gc === 'function') {
+    try {
+      global.gc();
+    } catch {}
+  }
+
   const problems = [];
   const memMB = await getTotalMemMB();
   if (memMB !== null && memMB >= MEM_ALERT_MB) {

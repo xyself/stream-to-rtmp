@@ -192,7 +192,22 @@ class StreamManager {
           if (this._notifyTimer) clearTimeout(this._notifyTimer);
           this._notifyTimer = setTimeout(async () => {
             this._notifyTimer = null;
-            if (this.isStopping || !this.ffmpeg?.getTrafficStats().running) return;
+            if (this.isStopping) return;
+
+            const traffic = this.ffmpeg?.getTrafficStats?.();
+            if (!traffic?.running) return;
+
+            // 借鉴 bililive-go：确认实际有数据流出（sessionBytes > 0）才判定开播
+            // 排除源流 404/握手失败导致的 FFmpeg 秒退假活
+            if ((traffic.sessionBytes || 0) <= 0) {
+              await new Promise(r => setTimeout(r, 3000));
+              if (this.isStopping) return;
+              const recheck = this.ffmpeg?.getTrafficStats?.();
+              if (!recheck?.running || (recheck.sessionBytes || 0) <= 0) {
+                console.log(`[${this.task.room_id}] 推流启动但未收到有效音视频数据，推迟开播播报`);
+                return;
+              }
+            }
 
             // 始终尝试获取房间信息
             try {
@@ -570,6 +585,9 @@ class StreamManager {
     const isOffline = lowerMsg.includes('房间未开播') ||
                       lowerMsg.includes('未开播') ||
                       lowerMsg.includes('主播尚未开播') ||
+                      lowerMsg.includes('已下播') ||
+                      lowerMsg.includes('主播已下播') ||
+                      lowerMsg.includes('下播') ||
                       lowerMsg.includes('not live') ||
                       lowerMsg.includes('offline') ||
                       lowerMsg.includes('未直播') ||

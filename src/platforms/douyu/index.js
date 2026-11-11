@@ -1,8 +1,12 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const axios = require('axios');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36';
+
+const LOCAL_CRYPTO_JS_PATH = path.join(__dirname, 'crypto-js.min.js');
 
 const CRYPTO_JS_CDNS = [
   'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/3.1.9-1/crypto-js.min.js',
@@ -24,6 +28,23 @@ function buildHeaders(defaultHeaders = {}, overrideHeaders = {}) {
 
 let cachedCryptoJS = null;
 let cryptoJSPromise = null; // 在途下载 Promise：多任务并发时只下载一次
+let cachedDid = null;
+
+// 借鉴 bililive-go：did 在生命周期内固定，避免每次签名都换新设备号触发风控
+function getDouyuDid() {
+  if (cachedDid) return cachedDid;
+  try {
+    const db = require('../../db');
+    cachedDid = db.getSetting?.('douyu_did');
+    if (!cachedDid) {
+      cachedDid = crypto.randomBytes(16).toString('hex');
+      db.setSetting?.('douyu_did', cachedDid);
+    }
+  } catch {
+    cachedDid = crypto.randomBytes(16).toString('hex');
+  }
+  return cachedDid;
+}
 
 // 平台接口统一超时：15 秒，避免某个请求 hang 住拖成僵尸任务
 const PLATFORM_TIMEOUT = 15000;
@@ -35,6 +56,15 @@ class DouyuEngine {
 
   async loadCryptoJS() {
     if (cachedCryptoJS) return cachedCryptoJS;
+
+    // 优先读取本地打包的 crypto-js，避免依赖外网 CDN
+    try {
+      if (fs.existsSync(LOCAL_CRYPTO_JS_PATH)) {
+        cachedCryptoJS = fs.readFileSync(LOCAL_CRYPTO_JS_PATH, 'utf8');
+        return cachedCryptoJS;
+      }
+    } catch {}
+
     if (!cryptoJSPromise) {
       cryptoJSPromise = (async () => {
         for (const url of CRYPTO_JS_CDNS) {
@@ -132,7 +162,7 @@ class DouyuEngine {
       vm.runInContext(cryptoJsCode, context);
       vm.runInContext(jsCode, context);
 
-      const did = crypto.randomBytes(16).toString('hex');
+      const did = getDouyuDid();
       const tt = Math.floor(Date.now() / 1000);
       const signQuery = vm.runInContext(`ub98484234("${realId}", "${did}", ${tt})`, context);
 

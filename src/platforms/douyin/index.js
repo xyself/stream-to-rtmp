@@ -1,19 +1,35 @@
 const axios = require('axios');
 
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const DEFAULT_COOKIE = '__ac_nonce=0658d6780004b23f5d0a8;';
+
+function getDouyinCookie() {
+  try {
+    const db = require('../../db');
+    const dbCookie = db.getSetting?.('douyin_cookie');
+    if (dbCookie) return dbCookie;
+  } catch {}
+  return process.env.DOUYIN_COOKIE || DEFAULT_COOKIE;
+}
+
 class DouyinEngine {
   constructor() {
-    this.http = axios.create({
-      timeout: 15000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'Cookie': '__ac_nonce=0658d6780004b23f5d0a8;',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      },
-    });
+    this.userAgent = DEFAULT_USER_AGENT;
+  }
+
+  getHeaders() {
+    return {
+      'User-Agent': this.userAgent,
+      'Cookie': getDouyinCookie(),
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    };
   }
 
   async _fetchPageData(roomId) {
-    const res = await this.http.get(`https://live.douyin.com/${roomId}`);
+    const res = await axios.get(`https://live.douyin.com/${roomId}`, {
+      timeout: 15000,
+      headers: this.getHeaders(),
+    });
     const html = res.data;
 
     const roomMatch = html.match(/room\\":{.*?\\"id_str\\":\\"(\d+)\\".*?,\\"status\\":(\d+).*?"title\\":\\"([^"]*)\\"/);
@@ -30,7 +46,6 @@ class DouyinEngine {
     const cover = coverMatch ? coverMatch[1].replace(/\\\\u0026/g, '&').replace(/\\u0026/g, '&').replace(/\\\\/g, '') : '';
 
     const isLive = status === '2';
-    if (!isLive) throw new Error('主播已下播');
 
     let m3u8 = null;
     const m3u8Match = html.match(/hls_pull_url_map\\":(\{.*?\})/);
@@ -59,7 +74,8 @@ class DouyinEngine {
 
   async getStreamUrl(roomId) {
     try {
-      const { flv, m3u8 } = await this._fetchPageData(roomId);
+      const { flv, m3u8, isLive } = await this._fetchPageData(roomId);
+      if (!isLive) throw new Error('主播已下播');
       const url = flv || m3u8;
       if (!url) throw new Error('未找到可用流地址');
       return url;
@@ -71,7 +87,8 @@ class DouyinEngine {
   getOptions(roomId) {
     return {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': this.userAgent,
+        'Cookie': getDouyinCookie(),
         'Referer': `https://live.douyin.com/${roomId}`,
       },
     };

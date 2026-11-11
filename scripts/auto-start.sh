@@ -42,8 +42,8 @@ fi
 cleanup_lock() { rm -rf "$LOCK_DIR"; }
 trap cleanup_lock EXIT INT TERM
 
-# ---- 2. 内存上限默认 256MB（小内存主机）----
-: "${NODE_OPTIONS:=--max-old-space-size=256}"
+# ---- 2. 内存上限默认 256MB 并开启主动 GC（小内存主机）----
+: "${NODE_OPTIONS:=--max-old-space-size=256 --expose-gc}"
 export NODE_OPTIONS
 
 mkdir -p logs
