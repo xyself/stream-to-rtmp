@@ -125,36 +125,103 @@ async function checkResources(bot) {
 
 function startHousekeeping({ scheduler, bot, onRestart }) {
   let lastDigestDate = null;
-  let lastNightlyDate = null;
+  let nextRestartTime = null;
+  let postponeCount = 0;
+  let isRestarting = false;
 
   async function sendAll(text) {
     const chatIds = bot.parseAllowedChatId?.();
     if (!chatIds) return;
     for (const id of chatIds) {
       try {
-        await bot.api.sendMessage(id, text);
+        await bot.api.sendMessage(id, text, { parse_mode: 'HTML' });
       } catch (err) {
         console.error('定时通知发送失败:', err.message);
       }
     }
   }
 
-  // #14 每天凌晨自动维护（重启 Node / 推流，彻底释放内存；serv00 只有 512MB）
-  async function nightlyRestart(today) {
+  function getBaseRestartHour() {
+    const hStr = db.getSetting('daily_restart_hour') || db.getSetting('nightly_restart_hour') || '10';
+    const h = parseInt(hStr, 10);
+    return Number.isFinite(h) && h >= 0 && h < 24 ? h : 10;
+  }
+
+  function calculateNextTargetTime(afterMs = Date.now()) {
+    const baseHour = getBaseRestartHour();
+    const cst = new Date(afterMs + 8 * 3600 * 1000);
+    const todayStr = `${cst.getUTCFullYear()}-${cst.getUTCMonth() + 1}-${cst.getUTCDate()}`;
+    const targetCst = new Date(Date.UTC(cst.getUTCFullYear(), cst.getUTCMonth(), cst.getUTCDate(), baseHour, 0, 0, 0));
+    let targetUtcMs = targetCst.getTime() - 8 * 3600 * 1000;
+
+    let lastRestartDate = null;
     try {
-      if (db.getSetting('nightly_restart') === '0') return; // 用户关掉就跳过
+      lastRestartDate = db.getSetting('last_daily_restart_date');
+    } catch {}
+
+    // 如果今天已经重启过，或者今天目标时间已过去超过 5 分钟，则排到明天同一时间
+    if (lastRestartDate === todayStr || targetUtcMs <= afterMs - 5 * 60 * 1000) {
+      targetUtcMs += 24 * 3600 * 1000;
+    }
+    return targetUtcMs;
+  }
+
+  // #14 每日定时自动维护（重启 Node / 推流，彻底释放内存；serv00 只有 512MB）
+  // 机制：默认每天早上 10 点，若检测到正在推流则自动顺延 1 小时，直至空闲或极端内存熔断
+  async function dailyMaintenanceRestart() {
+    if (isRestarting) return;
+    try {
+      if (db.getSetting('daily_restart') === '0' || db.getSetting('nightly_restart') === '0') return; // 用户关掉就跳过
     } catch (err) { /* 读不到配置就默认执行 */ }
-    const hour = parseInt(db.getSetting('nightly_restart_hour') || '4', 10) || 4;
-    const d = cstNow();
-    if (d.getUTCHours() !== hour || d.getUTCMinutes() >= 5) return;
-    if (lastNightlyDate === today) return;
-    lastNightlyDate = today;
+
+    const now = Date.now();
+    if (!nextRestartTime) {
+      nextRestartTime = calculateNextTargetTime(now);
+    }
+
+    if (now < nextRestartTime) return;
 
     const managers = [...(scheduler.runningManagers?.values() || [])]
       .filter((m) => m.ffmpeg?.getTrafficStats().running);
+    const isStreaming = managers.length > 0;
+    const enablePostpone = db.getSetting('daily_restart_postpone') !== '0';
 
-    const streamDesc = managers.length > 0 ? `（当前 ${managers.length} 路推流一并重置）` : '';
-    await sendAll(`🌙 凌晨自动维护：系统正在执行滚动重启以彻底重置内存${streamDesc}，预计 3~5 秒内自动拉起恢复…`);
+    // 极端内存水位兜底：若 Node 内存逼近 serv00 512MB 上限（>= 430MB），再不重启将被系统 OOM 强杀
+    let memMB = null;
+    try {
+      memMB = await getTotalMemMB();
+    } catch {}
+    const isCriticalMem = memMB !== null && memMB >= 430;
+
+    // 正在推流且非极端内存危机：顺延 1 小时
+    if (isStreaming && enablePostpone && !isCriticalMem) {
+      postponeCount += 1;
+      nextRestartTime = now + 3600 * 1000; // 顺延 1 小时
+      const nextCst = new Date(nextRestartTime + 8 * 3600 * 1000);
+      const nextHourStr = `${String(nextCst.getUTCHours()).padStart(2, '0')}:${String(nextCst.getUTCMinutes()).padStart(2, '0')}`;
+      console.log(`[housekeeping] 当前 ${managers.length} 路正在推流，每日维护重启顺延至 ${nextHourStr} (已累计顺延 ${postponeCount} 次)`);
+
+      // 顺延提醒：第 1 次顺延及后续每顺延 3 次时通知一次，避免频繁骚扰
+      if (postponeCount === 1 || postponeCount % 3 === 0) {
+        await sendAll(`⏳ <b>系统维护延后通知</b>\n检测到当前有 ${managers.length} 路直播正在推流，为保障直播不中断，每日维护重启自动顺延 1 小时至上海时间 <b>${nextHourStr}</b> 再次检查（累计顺延 ${postponeCount} 次）。`).catch(() => {});
+      }
+      return;
+    }
+
+    // 允许重启（完全空闲或触发紧急内存熔断）
+    isRestarting = true;
+    const streamDesc = isStreaming ? `（当前 ${managers.length} 路推流一并重置）` : '（当前无推流，静默重置）';
+    const cst = new Date(now + 8 * 3600 * 1000);
+    const todayStr = `${cst.getUTCFullYear()}-${cst.getUTCMonth() + 1}-${cst.getUTCDate()}`;
+
+    try {
+      db.setSetting('last_daily_restart_date', todayStr);
+    } catch {}
+
+    postponeCount = 0;
+    nextRestartTime = calculateNextTargetTime(now + 24 * 3600 * 1000 - 10 * 60 * 1000);
+
+    await sendAll(`🔄 <b>系统每日维护重启</b>\n系统正在执行滚动重启以彻底重置内存${streamDesc}，预计 3~5 秒内自动拉起恢复…`);
 
     // 重启前截断清理 SQLite WAL 映射
     try {
@@ -176,15 +243,16 @@ function startHousekeeping({ scheduler, bot, onRestart }) {
         await scheduler.refreshTask?.(m.task);
         done += 1;
       } catch (err) {
-        console.error(`[housekeeping] 凌晨重启 ${m.task?.room_id} 失败:`, err.message);
+        console.error(`[housekeeping] 维护重启 ${m.task?.room_id} 失败:`, err.message);
       }
       // 逐个重启、间隔 30 秒错峰，避免同时重连打爆平台接口
       await new Promise((resolve) => setTimeout(resolve, 30000));
     }
-    await sendAll(`✅ 凌晨自动维护完成：${done}/${managers.length} 路推流已重启`);
+    await sendAll(`✅ 每日自动维护完成：${done}/${managers.length} 路推流已重启`);
+    isRestarting = false;
   }
 
-  // 每分钟检查一次：到点发小结 / 到点凌晨重启
+  // 每分钟检查一次：到点发小结 / 检查每日维护重启
   setInterval(() => {
     try {
       const d = cstNow();
@@ -193,9 +261,9 @@ function startHousekeeping({ scheduler, bot, onRestart }) {
         lastDigestDate = today;
         sendDailyDigest(scheduler, bot).catch((err) => console.error('每日小结失败:', err.message));
       }
-      nightlyRestart(today).catch((err) => console.error('凌晨重启失败:', err.message));
+      dailyMaintenanceRestart().catch((err) => console.error('每日维护重启检查失败:', err.message));
     } catch (err) {
-      console.error('小结定时器异常:', err.message);
+      console.error('定时器异常:', err.message);
     }
   }, 60000);
 

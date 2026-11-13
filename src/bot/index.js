@@ -48,9 +48,10 @@ function buildMainKeyboard() {
 
 function buildDashboardKeyboard() {
   const transcodeOn = db.getSetting?.('transcode_video') === '1';
-  const nightlyOn = db.getSetting?.('nightly_restart') !== '0';
+  const nightlyOn = db.getSetting?.('daily_restart') !== '0' && db.getSetting?.('nightly_restart') !== '0';
   const failbackOn = db.getSetting?.('auto_failback') !== '0';
   const liveSnapshotOn = db.getSetting?.('live_snapshot') === '1';
+  const hour = db.getSetting?.('daily_restart_hour') || db.getSetting?.('nightly_restart_hour') || '10';
   const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
     .text('🛑 全部暂停', 'global_disable_all')
@@ -59,7 +60,7 @@ function buildDashboardKeyboard() {
     .text('🧹 清理重启', 'global_clean_restart')
     .row()
     .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row()
-    .text(`🌙 凌晨重启: ${nightlyOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_nightly')
+    .text(`🔄 每日维护: ${nightlyOn ? `✅ ${hour}点(推流顺延)` : '⛔ 关'}`, 'global_toggle_nightly')
     .text(`🔀 自动切回主线路: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback').row()
     .text(`📷 开播截图: ${liveSnapshotOn ? '✅ 开启' : '⚪ 关闭(省内存)'}`, 'global_toggle_live_snapshot').row()
     .text('📩 测试通知', 'global_test_notify')
@@ -663,11 +664,14 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   });
 
-  // #14：凌晨自动重启开关
+  // #14：每日定时维护重启开关（默认早上10点，推流中自动顺延1小时）
   bot.callbackQuery('global_toggle_nightly', async (ctx) => {
-    const newValue = db.getSetting('nightly_restart') === '0' ? '1' : '0';
+    const isCurrentlyOn = db.getSetting('daily_restart') !== '0' && db.getSetting('nightly_restart') !== '0';
+    const newValue = isCurrentlyOn ? '0' : '1';
+    db.setSetting('daily_restart', newValue);
     db.setSetting('nightly_restart', newValue);
-    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 凌晨自动重启已开启（每天 4 点）' : '⛔ 凌晨自动重启已关闭');
+    const hour = db.getSetting('daily_restart_hour') || db.getSetting('nightly_restart_hour') || '10';
+    await ctx.answerCallbackQuery(newValue === '1' ? `✅ 每日自动维护已开启（每天 ${hour} 点，推流中自动顺延 1 小时）` : '⛔ 每日自动维护已关闭');
     await refreshDashboard(ctx);
   });
 
