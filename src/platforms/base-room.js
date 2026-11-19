@@ -1,5 +1,7 @@
+const defaultRateLimiter = require('./rate-limiter');
+
 class BaseRoom {
-  constructor({ roomId, engine, headers = {}, metadata = {} }) {
+  constructor({ roomId, engine, platform = null, rateLimiter = defaultRateLimiter, headers = {}, metadata = {} }) {
     if (!roomId) throw new Error('roomId is required');
     if (!engine || typeof engine.getStreamUrl !== 'function') {
       throw new Error('engine.getStreamUrl is required');
@@ -7,24 +9,33 @@ class BaseRoom {
 
     this.roomId = roomId;
     this.engine = engine;
+    this.platform = platform || metadata?.platform || null;
+    this.rateLimiter = rateLimiter;
     this.headers = headers;
     this.metadata = metadata;
   }
 
+  _runRateLimited(fn) {
+    if (this.rateLimiter && typeof this.rateLimiter.schedule === 'function') {
+      return this.rateLimiter.schedule(this.platform || 'default', fn);
+    }
+    return fn();
+  }
+
   async getStreamUrl() {
-    return this.engine.getStreamUrl(this.roomId, {
+    return this._runRateLimited(() => this.engine.getStreamUrl(this.roomId, {
       headers: this.headers,
       metadata: this.metadata,
-    });
+    }));
   }
 
   // 返回全部可用源流线路（主线路在前）；引擎没实现时退化为单线路
   async getStreamUrls() {
     if (typeof this.engine.getStreamUrls === 'function') {
-      return this.engine.getStreamUrls(this.roomId, {
+      return this._runRateLimited(() => this.engine.getStreamUrls(this.roomId, {
         headers: this.headers,
         metadata: this.metadata,
-      });
+      }));
     }
     return [await this.getStreamUrl()];
   }
@@ -33,10 +44,10 @@ class BaseRoom {
     if (typeof this.engine.getInfo !== 'function') {
       return { hostName: '', roomName: '', isLive: false };
     }
-    return this.engine.getInfo(this.roomId, {
+    return this._runRateLimited(() => this.engine.getInfo(this.roomId, {
       headers: this.headers,
       metadata: this.metadata,
-    });
+    }));
   }
 }
 

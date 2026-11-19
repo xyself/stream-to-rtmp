@@ -21,8 +21,20 @@ function isNumericRoomId(value) {
   return /^\d+$/.test(value);
 }
 
+function isValidRelayTargetUrl(value) {
+  return /^(rtmp|rtmps):\/\//i.test(value);
+}
+
+function parsePlatformAlias(token = '') {
+  const lower = String(token).trim().toLowerCase();
+  if (['bilibili', 'bili', 'b站', '哔哩哔哩'].includes(lower)) return 'bilibili';
+  if (['douyu', '斗鱼'].includes(lower)) return 'douyu';
+  if (['douyin', '抖音'].includes(lower)) return 'douyin';
+  return null;
+}
+
 function parseLiveRoomInput(input) {
-  const text = input.trim();
+  const text = String(input || '').trim();
 
   if (/^\d+$/.test(text)) {
     return { roomId: text, platform: null };
@@ -48,8 +60,64 @@ function parseLiveRoomInput(input) {
   return { error: '无法识别，请发送直播间链接或纯数字房间号' };
 }
 
-function isValidRelayTargetUrl(value) {
-  return /^(rtmp|rtmps):\/\//i.test(value);
+/**
+ * 解析“一条消息极速添加房间”输入：
+ * 支持：
+ * 1) https://live.bilibili.com/1000 rtmp://a.rtmp.youtube.com/live2/key1 [rtmp://backup...]
+ * 2) bilibili 1000 rtmp://... 或 B站 1000 rtmp://...
+ */
+function parseQuickAddInput(input = '') {
+  const text = String(input || '').trim().replace(/^\/addroom\s+/i, '');
+  if (!text) return null;
+
+  const tokens = text
+    .split(/[\s,，]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  const rtmpUrls = tokens.filter((t) => isValidRelayTargetUrl(t));
+  if (rtmpUrls.length === 0) return null;
+
+  const nonRtmpTokens = tokens.filter((t) => !isValidRelayTargetUrl(t));
+  if (nonRtmpTokens.length === 0) return null;
+
+  // 情况 1：包含直播间链接
+  for (const token of nonRtmpTokens) {
+    const parsed = parseLiveRoomInput(token);
+    if (parsed.roomId && parsed.platform) {
+      return {
+        platform: parsed.platform,
+        roomId: parsed.roomId,
+        targetUrl: rtmpUrls[0],
+        extraTargetUrls: rtmpUrls.slice(1),
+      };
+    }
+  }
+
+  // 情况 2：平台别名 + 纯数字房间号（如 "b站 1000 rtmp://..." 或 "1000 bilibili rtmp://..."）
+  let platform = null;
+  let roomId = null;
+  for (const token of nonRtmpTokens) {
+    const p = parsePlatformAlias(token);
+    if (p && !platform) {
+      platform = p;
+      continue;
+    }
+    if (isNumericRoomId(token) && !roomId) {
+      roomId = token;
+    }
+  }
+
+  if (platform && roomId) {
+    return {
+      platform,
+      roomId,
+      targetUrl: rtmpUrls[0],
+      extraTargetUrls: rtmpUrls.slice(1),
+    };
+  }
+
+  return null;
 }
 
 const SESSION_TIMEOUT_MS = 60 * 1000;
@@ -66,6 +134,8 @@ function cleanExpiredSessions(sessionData) {
   if (isSessionExpired(sessionData.editRoom)) sessionData.editRoom = null;
   if (isSessionExpired(sessionData.editRtmp)) sessionData.editRtmp = null;
   if (isSessionExpired(sessionData.addRtmp)) sessionData.addRtmp = null;
+  if (isSessionExpired(sessionData.setCookie)) sessionData.setCookie = null;
+  if (isSessionExpired(sessionData.editRoomCookie)) sessionData.editRoomCookie = null;
 }
 
 function resetAllSessions(sessionData) {
@@ -73,6 +143,8 @@ function resetAllSessions(sessionData) {
   sessionData.editRoom = null;
   sessionData.editRtmp = null;
   sessionData.addRtmp = null;
+  sessionData.setCookie = null;
+  sessionData.editRoomCookie = null;
 }
 
 function ensureAddRoomState(sessionData) {
@@ -92,6 +164,8 @@ module.exports = {
   getMessageTextOrEmpty,
   isNumericRoomId,
   parseLiveRoomInput,
+  parseQuickAddInput,
+  parsePlatformAlias,
   isValidRelayTargetUrl,
   isSessionExpired,
   cleanExpiredSessions,

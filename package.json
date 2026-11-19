@@ -4,13 +4,17 @@
   "description": "Bilibili/Douyu live relay bot with Telegram control panel",
   "main": "main.js",
   "scripts": {
-    "start": "node main.js"
+    "dev": "node --max-semi-space-size=2 --max-old-space-size=192 --v8-pool-size=2 main.js",
+    "build": "node --check main.js",
+    "lint": "node --check main.js && node --check src/config/index.js && node --check src/core/runtime-env.js && node --check src/core/logger.js && node --check src/core/events.js && node --check src/core/health-monitor.js && node --check src/core/scheduler.js && node --check src/core/manager.js && node --check src/core/housekeeping.js && node --check src/core/curve-chart.js && node --check src/platforms/http.js && node --check src/platforms/index.js && node --check src/platforms/base-room.js && node --check src/platforms/rate-limiter.js && node --check src/platforms/bilibili/index.js && node --check src/platforms/douyu/index.js && node --check src/platforms/douyin/index.js && node --check src/services/ffmpeg-service.js && node --check src/services/ffmpeg-installer.js && node --check src/db/index.js && node --check src/db/gist-sync.js && node --check src/bot/index.js && node --check src/bot/widget.js && node --check src/bot/ephemeral.js && node --check src/bot/handlers/room.js && node --check src/web/dashboard.js",
+    "test": "node --test test/*.test.js",
+    "update-ffmpeg": "node scripts/update-ffmpeg.js",
+    "start": "node --max-semi-space-size=2 --max-old-space-size=192 --v8-pool-size=2 main.js"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "axios": "^1.15.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "grammy": "^1.42.0"

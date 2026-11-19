@@ -1,3 +1,4 @@
+const config = require('../config');
 const db = require('../db');
 const StreamManager = require('./manager');
 
@@ -6,7 +7,7 @@ class Scheduler {
     this.runningManagers = new Map();
     this.timer = null;
     this.onNotify = onNotify;
-    this.bootGraceUntil = 0; // #18：启动后 90 秒静默期，不补"已下播/直播结束"类播报
+    this.bootGraceUntil = 0;
   }
 
   buildTaskKey(task) {
@@ -44,12 +45,8 @@ class Scheduler {
 
   async refreshTask(task) {
     if (!task) return;
-
     this.stopManager(task);
-
-    if (task.status !== 'ENABLED') {
-      return;
-    }
+    if (task.status !== 'ENABLED') return;
 
     const latestTask = db.getTaskById?.(task.id) || task;
     const manager = this.createManager(latestTask);
@@ -64,14 +61,11 @@ class Scheduler {
       if (!enabledKeys.has(taskKey)) {
         manager.stop();
         this.runningManagers.delete(taskKey);
-      } else {
-        if (typeof manager.checkHealth === 'function') {
-          manager.checkHealth();
-        }
+      } else if (typeof manager.checkHealth === 'function') {
+        manager.checkHealth();
       }
     }
 
-    // 新任务逐个启动、间隔 2.5 秒错峰：避免重启瞬间 N 个任务同时打平台接口
     const toStart = enabledTasks.filter((task) => !this.runningManagers.has(this.buildTaskKey(task)));
     if (toStart.length > 0) {
       (async () => {
@@ -93,13 +87,12 @@ class Scheduler {
               });
             }
           }
-          await new Promise((resolve) => setTimeout(resolve, 2500));
+          await new Promise((resolve) => setTimeout(resolve, config.polling.staggerStartMs));
         }
       })().catch(() => {});
     }
   }
 
-  // 每日小结：聚合各任务的当日推流统计
   getDigestStats() {
     const list = [];
     for (const manager of this.runningManagers.values()) {
@@ -118,9 +111,13 @@ class Scheduler {
     }
   }
 
-  getStats() {    const tasks = db.getAllTasks();
+  getStats() {
+    const tasks = db.getAllTasks();
     const enabledTasks = tasks.filter((task) => task.status === 'ENABLED').length;
-    const totalTargets = tasks.reduce((sum, task) => sum + ((Array.isArray(task.targets) && task.targets.length > 0) ? task.targets.length : 0), 0);
+    const totalTargets = tasks.reduce(
+      (sum, task) => sum + (Array.isArray(task.targets) ? task.targets.length : 0),
+      0
+    );
     let activeStreams = 0;
     for (const manager of this.runningManagers.values()) {
       if (manager.getTrafficStats?.().running) activeStreams++;
@@ -161,47 +158,36 @@ class Scheduler {
     await Promise.all(promises);
   }
 
-  enableAllStats() {
-    let enabled = 0;
-    for (const manager of this.runningManagers.values()) {
-      if (typeof manager.enableStats === 'function') {
-        if (manager.enableStats()) enabled++;
-      }
-    }
-    return enabled;
-  }
-
-  start(interval = 30000) {
+  start(interval = config.polling.schedulerTickMs) {
     if (this.timer) return;
     this._stopped = false;
-    this.bootGraceUntil = Date.now() + 90000; // #18：启动后 90 秒静默期
+    this.bootGraceUntil = Date.now() + config.polling.bootGraceMs;
     this.timer = setInterval(() => this.tick(), interval);
     this.tick();
   }
 
-  setOnNotify(callback) {
-    this.onNotify = callback;
-  }
-
-  // 返回 Promise：等所有 FFmpeg 进程真正退出（或超时）后 resolve，
-  // 优雅关闭时 main.js 会 await 它
-  async stopAll() {
+  stopAll() {
     this._stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
 
-    const managers = [...this.runningManagers.values()];
+    const stops = [];
+    for (const manager of this.runningManagers.values()) {
+      const p = manager.stop();
+      if (p && typeof p.then === 'function') stops.push(p);
+    }
     this.runningManagers.clear();
-    await Promise.all(managers.map((manager) => {
-      try {
-        return manager.stop();
-      } catch {
-        return Promise.resolve();
-      }
-    }));
+    return Promise.allSettled(stops);
+  }
+
+  setOnNotify(callback) {
+    this.onNotify = callback;
   }
 }
 
-module.exports = new Scheduler();
+const defaultScheduler = new Scheduler();
+
+module.exports = defaultScheduler;
+module.exports.Scheduler = Scheduler;

@@ -1,7 +1,7 @@
 # AI Agent Guide: StreamOps Relay System
 
 **项目名称**: StreamOps 直播转播系统  
-**核心语言**: Node.js (CommonJS, v25.8.2+)  
+**核心语言**: Node.js (CommonJS, v26.13.1+)  
 **主要架构**: 任务调度器 (Scheduler) + 状态机管理器 (StreamManager) + FFmpeg 进程封装层 (FFmpegService)
 
 ---

@@ -1,36 +1,49 @@
 const { Bot, InlineKeyboard, Keyboard, session, InputFile } = require('grammy');
-const os = require('os');
-const fs = require('fs');
-const path = require('path');
+const os = require('node:os');
+const fs = require('node:fs');
 const db = require('../db');
 const scheduler = require('../core/scheduler');
+const logger = require('../core/logger');
 const views = require('./views');
 const { parseAllowedChatId, resetAllSessions } = require('./utils/parser');
 const roomHandlers = require('./handlers/room');
 const rtmpHandlers = require('./handlers/rtmp');
 const gistSync = require('../db/gist-sync');
+const http = require('../platforms/http');
 const widgetHelper = require('./widget');
+const ffmpegInstaller = require('../services/ffmpeg-installer');
+const {
+  safeEditMessageText,
+  sendEphemeralMessage,
+  sendEphemeralPhoto,
+} = require('./ephemeral');
 
-async function safeEditMessageText(ctx, text, options) {
-  try {
-    await ctx.editMessageText(text, options);
-  } catch (err) {
-    if (err.message?.includes('message is not modified')) return;
-    throw err;
-  }
+function getFfmpegMeta(forceRefresh = false) {
+  const info = ffmpegInstaller.getFfmpegRuntimeInfo({ forceRefresh });
+  return {
+    binPath: info.binPath,
+    resolvedPath: info.resolvedPath,
+    version: info.ok ? info.version : '未知',
+    source: info.sourceLabel,
+    isCustomBinary: info.isCustomBinary,
+  };
 }
 
 function createChatGuard(allowedChatId = parseAllowedChatId()) {
   // 白名单为空直接拒绝（fail-closed）；正常启动时 main.js 已拒绝空 TG_CHAT_ID，这里是兜底
   if (!allowedChatId || allowedChatId.size === 0) return async (ctx, next) => {};
   return async (ctx, next) => {
-    const chatId = ctx?.chat?.id;
+    const widgetQuery = ctx?.update?.widget_query;
+    const chatId = ctx?.chat?.id ?? widgetQuery?.chat?.id ?? widgetQuery?.from?.id;
     if (!allowedChatId.has(String(chatId))) {
       if (ctx?.callbackQuery) {
         await ctx.answerCallbackQuery().catch(() => {});
       }
-      if (chatId) {
-        await ctx.api.leaveChat(chatId).catch(() => {});
+      if (widgetQuery?.id) {
+        await ctx.api.raw.answerWidgetQuery({ widget_query_id: widgetQuery.id, data: '未授权访问' }).catch(() => {});
+      }
+      if (ctx?.chat?.id) {
+        await ctx.api.leaveChat(ctx.chat.id).catch(() => {});
       }
       return;
     }
@@ -48,9 +61,11 @@ function buildMainKeyboard() {
 
 function buildDashboardKeyboard() {
   const transcodeOn = db.getSetting?.('transcode_video') === '1';
+  const audioFixOn = db.getSetting?.('transcode_audio') === '1';
   const nightlyOn = db.getSetting?.('daily_restart') !== '0' && db.getSetting?.('nightly_restart') !== '0';
   const failbackOn = db.getSetting?.('auto_failback') !== '0';
   const liveSnapshotOn = db.getSetting?.('live_snapshot') === '1';
+  const autoBackupOn = db.getSetting?.('auto_tg_backup') !== '0';
   const hour = db.getSetting?.('daily_restart_hour') || db.getSetting?.('nightly_restart_hour') || '10';
   const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
@@ -59,12 +74,26 @@ function buildDashboardKeyboard() {
     .text('🔄 刷新全部', 'global_refresh_all')
     .text('🧹 清理重启', 'global_clean_restart')
     .row()
-    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode').row()
-    .text(`🔄 每日维护: ${nightlyOn ? `✅ ${hour}点(推流顺延)` : '⛔ 关'}`, 'global_toggle_nightly')
-    .text(`🔀 自动切回主线路: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback').row()
-    .text(`📷 开播截图: ${liveSnapshotOn ? '✅ 开启' : '⚪ 关闭(省内存)'}`, 'global_toggle_live_snapshot').row()
+    .text(`🎬 画质转码: ${transcodeOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_transcode')
+    .text(`🔊 音频修复: ${audioFixOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_audio_fix')
+    .row()
+    .text(`📷 开播截图: ${liveSnapshotOn ? '✅ 开启' : '⚪ 省内存'}`, 'global_toggle_live_snapshot')
+    .text(`💾 自动TG备份: ${autoBackupOn ? '✅ 开' : '⚪ 关'}`, 'global_toggle_auto_backup')
+    .row()
+    .text(`🔄 每日维护: ${nightlyOn ? `✅ ${hour}点` : '⛔ 关'}`, 'global_toggle_nightly')
+    .text(`⏰ 维护时间: ${hour}:00`, 'global_set_restart_hour')
+    .row()
+    .text(`🔀 自动切回主线: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback')
+    .text('📈 24h推流曲线', 'curve:all:noon')
+    .row()
+    .text('📜 查日志', 'global_view_logs')
+    .text('🛠️ FFmpeg 参数', 'global_ffmpeg_params')
+    .text('⬆️ 升级FFmpeg', 'global_update_ffmpeg')
+    .row()
+    .text('📤 导出备份文件', 'global_export_backup')
+    .text('📥 导入备份文件', 'global_import_backup')
     .text('📩 测试通知', 'global_test_notify')
-    .text('📜 查日志', 'global_view_logs').row();
+    .row();
   keyboard.text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
   return keyboard;
 }
@@ -72,8 +101,11 @@ function buildDashboardKeyboard() {
 function buildTaskListKeyboard(tasks) {
   const keyboard = new InlineKeyboard();
   tasks.forEach((task) => {
-    const icon = task.status === 'ENABLED' ? '✅' : '🛑';
-    keyboard.text(`${icon} ${views.platformLabel(task.platform)} ${task.room_id}`, `manage:${task.id}`).row();
+    const running = task.traffic?.running;
+    const icon = task.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '✅';
+    const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
+    const cookieBadge = task.cookie ? ' 🍪' : '';
+    keyboard.text(`${icon} ${views.platformLabel(task.platform)} #${task.room_id}${host}${cookieBadge}`, `manage:${task.id}`).row();
   });
   return keyboard;
 }
@@ -85,29 +117,51 @@ function buildStatusListKeyboard(entries) {
     const running = entry.traffic?.running;
     const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
     const kbps = Math.round(entry.traffic?.bitrateKbps || 0);
+    const host = entry.traffic?.roomInfo?.hostName ? ` (${entry.traffic.roomInfo.hostName})` : '';
     const extra = running && kbps > 0 ? ` · ${kbps}k` : '';
-    keyboard.text(`${icon} ${views.platformLabel(entry.platform)} #${entry.room_id}${extra}`, `tstatus:${entry.id}`).row();
+    keyboard.text(`${icon} ${views.platformLabel(entry.platform)} #${entry.room_id}${host}${extra}`, `tstatus:${entry.id}`).row();
   });
+  keyboard
+    .text('📈 24h推流曲线 (12:00→12:00)', 'curve:all:noon')
+    .text('🔄 刷新总览', 'tstatus_back');
   return keyboard;
 }
 
 function buildTaskDetailKeyboard(task) {
+  const hasCookie = Boolean(task.cookie && String(task.cookie).trim());
+  const modeMap = {
+    default: '⚙️跟随',
+    copy: '⚡直推',
+    audio_fix: '🔊修音',
+    transcode: '🎬转码',
+  };
+  const modeShort = modeMap[task.transcode_mode || 'default'] || '⚙️跟随';
+
   const keyboard = new InlineKeyboard()
     .text(task.status === 'ENABLED' ? '🛑 停止监控' : '▶️ 开启监控', `toggle:${task.id}:${task.status}`)
+    .text('🔄 刷新', `refresh:${task.id}`)
     .row();
   if (task.status === 'ENABLED') {
-    keyboard.text('📸 获取截图', `screenshot:${task.id}`).row();
-    keyboard.text('📊 本场统计', `stat:${task.id}`).text('🔀 切换线路', `failover:${task.id}`).row();
+    keyboard
+      .text('📸 获取截图', `screenshot:${task.id}`)
+      .text('📊 本场统计', `stat:${task.id}`)
+      .text('🔀 切换线路', `failover:${task.id}`)
+      .row();
   }
   keyboard
-    .text('🔄 刷新', `refresh:${task.id}`)
+    .text('📈 24h曲线', `curve:${task.id}:noon`)
+    .text('🩺 诊断测试', `diagnose:${task.id}`)
+    .text(`🎬 编码:${modeShort}`, `transcode_mode:${task.id}`)
+    .row()
     .text('✏️ 房间号', `editroom:${task.id}`)
+    .text('✏️ 改主地址', `editrtmp:${task.id}`)
+    .text(hasCookie ? '🍪 Cookie ✅' : '🍪 房间Cookie', `editcookie:${task.id}`)
     .row()
     .text('➕ 添加地址', `addrtmp_ui:${task.id}`)
     .text('➖ 删除地址', `delurl_ui:${task.id}`)
     .row()
-    .text('🗑️ 删除任务', `del:${task.id}`)
-    .text('⬅️ 返回', 'back_list');
+    .text('🗑️ 删除任务', `del_confirm:${task.id}`)
+    .text('⬅️ 返回列表', 'back_list');
   return keyboard;
 }
 
@@ -148,6 +202,7 @@ function getSystemInfo() {
   } catch {}
   
   const memPct = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+  const ffMeta = getFfmpegMeta();
   return {
     cpuPercent,
     cpuBar: views.progressBar(cpuPercent),
@@ -157,7 +212,12 @@ function getSystemInfo() {
     serviceMem: views.formatBytes(serviceMem),
     uptime: views.formatUptime(process.uptime()),
     dbSize,
+    ffmpegVersion: ffMeta.version,
+    ffmpegPath: ffMeta.resolvedPath,
+    ffmpegSource: ffMeta.source,
+    ffmpegCustomBinary: ffMeta.isCustomBinary,
     transcodeVideo: db.getSetting?.('transcode_video') === '1',
+    transcodeAudio: db.getSetting?.('transcode_audio') === '1',
   };
 }
 
@@ -200,14 +260,18 @@ async function registerBotCommands(bot) {
 
   const commands = [
     { command: 'start',   description: '🚀 打开控制中心主菜单' },
-    { command: 'widget',  description: '📊 实时监控 Widget（Bot API 10.4）' },
+    { command: 'curve',   description: '📈 24小时推流码率波浪曲线图 (12:00→12:00)' },
     { command: 'status',  description: '📺 推流状态 & 房间详情' },
-    { command: 'panel',   description: '⚙️ 全局控制台（开关/重启/Gist）' },
-    { command: 'rooms',   description: '🏠 房间列表管理' },
-    { command: 'addroom', description: '➕ 添加新直播房间' },
+    { command: 'panel',   description: '⚙️ 全局控制台（开关/重启/备份）' },
+    { command: 'rooms',   description: '🏠 房间列表管理（含独立Cookie/编码/诊断）' },
+    { command: 'addroom', description: '➕ 添加新直播房间（支持一行创建）' },
+    { command: 'backup',  description: '📤 一键导出/导入 JSON 备份文件' },
+    { command: 'cookie',  description: '🍪 为指定房间绑定独立 Cookie' },
     { command: 'notify',  description: '🔔 通知开关设置' },
     { command: 'logs',    description: '📜 查看最近日志' },
+    { command: 'ffmpeg',  description: '🛠️ 查看 FFmpeg 推流参数' },
     { command: 'traffic', description: '📈 流量 & 码率统计' },
+    { command: 'widget',  description: '📊 实时监控 Widget（Bot API 10.4）' },
   ];
 
   // 私聊命令列表（完整）
@@ -217,11 +281,31 @@ async function registerBotCommands(bot) {
 }
 
 function createRelayBot(token = process.env.TG_TOKEN) {
-  const bot = new Bot(token, { client: { timeoutSeconds: 60 } });
+  if (!token || !String(token).trim()) {
+    return {
+      isConfigured: false,
+      isRunning: () => false,
+      start: async () => {},
+      stop: async () => {},
+      catch: () => {},
+      api: null,
+      _widgetMessages: {},
+    };
+  }
+  const clientOpts = { timeoutSeconds: 60 };
+  if (process.env.TG_API_ENV === 'test') {
+    clientOpts.environment = 'test';
+  }
+  const bot = new Bot(token, { client: clientOpts });
+  bot.isConfigured = true;
   const mainKeyboard = buildMainKeyboard();
+  const ephemeralReply = (ctx, text, options = {}) => sendEphemeralMessage(bot, ctx, text, options);
+  const ephemeralPhoto = (ctx, photo, options = {}) => sendEphemeralPhoto(bot, ctx, photo, options);
 
   const sharedDeps = {
     safeEditMessageText,
+    ephemeralReply,
+    ephemeralPhoto,
     buildTaskDetailKeyboard,
     buildTaskListKeyboard,
     buildDashboardKeyboard,
@@ -249,43 +333,10 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
   };
 
-  // #10：TG 里查日志（最近 20 行，URL 脱敏）
-  // 只读文件末尾 64KB：app.log 最大 50MB，整文件 readFileSync 会堵死事件循环导致按钮卡死
-  const readLogLines = ({ onlyErrors = false, limit = 20 } = {}) => {
-    const logPath = path.join(__dirname, '../../logs/app.log');
-    const TAIL_BYTES = 64 * 1024;
-    let tail = '';
-    let truncated = false;
-    try {
-      const size = fs.statSync(logPath).size;
-      truncated = size > TAIL_BYTES;
-      const start = truncated ? size - TAIL_BYTES : 0;
-      const len = truncated ? TAIL_BYTES : size;
-      const fd = fs.openSync(logPath, 'r');
-      try {
-        const buf = Buffer.alloc(len);
-        fs.readSync(fd, buf, 0, len, start);
-        tail = buf.toString('utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch {
-      return ['日志文件不存在（可能还没产生日志）'];
-    }
-    let lines = tail.split('\n').filter((l) => l.trim());
-    if (truncated) lines = lines.slice(1); // 丢掉第一行（可能是被截断的半行）
-    if (onlyErrors) {
-      lines = lines.filter((l) => /error|❌|失败|fail|exception|超时|断开|熔断/i.test(l));
-    }
-    return lines.slice(-limit).map((l) =>
-      // 脱敏：URL（含推流密钥）只留 host
-      l.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`]+)/g, (m) => views.maskTargetUrl(m))
-    );
-  };
-
+  // #10：TG 里查日志（优先从内存环形缓冲读取，无重定向文件时也能正常查询，且自动 URL 脱敏）
   const showLogs = async (ctx, edit = false) => {
     const onlyErrors = ctx.session.logFilter === 'errors';
-    const lines = readLogLines({ onlyErrors });
+    const lines = logger.queryLines({ onlyErrors, limit: 20 });
     const body = lines.length
       ? lines.map((l) => views.escapeHtml(l.length > 300 ? l.slice(0, 300) + '…' : l)).join('\n')
       : '(没有符合条件的日志)';
@@ -299,74 +350,46 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     if (edit) {
       await safeEditMessageText(ctx, text, opts);
     } else {
-      await ctx.reply(text, opts);
+      await ephemeralReply(ctx, text, opts);
     }
   };
 
   const showTraffic = async (ctx) => {
-    if (typeof scheduler.enableAllStats === 'function') {
-      scheduler.enableAllStats();
-    }
     await ctx.reply(views.renderRoomTraffic(scheduler.getTrafficStats()), { parse_mode: 'HTML', reply_markup: mainKeyboard });
   };
 
-  const showStatus = async (ctx) => {
-    // 先刷一遍房间信息，保证封面最新（最多等 3 秒）
+  const showStatus = async (ctx, edit = false) => {
     try {
       await Promise.race([
         scheduler.refreshAllRoomInfo(),
         new Promise((resolve) => setTimeout(resolve, 3000)),
       ]);
-    } catch (err) {}
+    } catch {}
 
     const stats = scheduler.getTrafficStats();
     if (stats.length === 0) {
-      return await ctx.reply('当前还没有配置房间');
+      return await ctx.reply('当前还没有配置房间，点击「➕ 添加房间」开始创建。');
     }
 
-    // 有封面的房间：一间一条图文消息，标题紧凑，按钮进详情
-    const noCover = [];
-    for (const entry of stats) {
-      const cover = entry.traffic?.roomInfo?.cover;
-      if (!cover) { noCover.push(entry); continue; }
-
-      const running = entry.traffic?.running;
-      const kbps = Math.round(entry.traffic?.bitrateKbps || 0);
-      const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
-      const stateLine = entry.status !== 'ENABLED' ? '已暂停'
-        : running ? `推流中${kbps > 0 ? ` · ${kbps} kbps` : ''}`
-        : '待机 / 等待开播';
-      const caption =
-        `${icon} <b>${views.escapeHtml(views.platformLabel(entry.platform))} #${views.escapeHtml(entry.room_id)}</b>\n${stateLine}`;
-      // 添加时间戳防止 TG 缓存旧封面
-      const coverUrl = cover.includes('?')
-        ? `${cover}&t=${Date.now()}`
-        : `${cover}?t=${Date.now()}`;
-      try {
-        await ctx.replyWithPhoto(coverUrl, {
-          caption,
-          parse_mode: 'HTML',
-          reply_markup: new InlineKeyboard().text('📺 查看详情', `tstatus:${entry.id}`),
-        });
-      } catch (err) {
-        noCover.push(entry); // 图发不出就进文字列表
-      }
-    }
-
-    // 没封面的房间：一条文字列表兜底
-    if (noCover.length > 0) {
-      await ctx.reply(views.renderStatusList(noCover), {
-        parse_mode: 'HTML',
-        reply_markup: buildStatusListKeyboard(noCover),
-      });
+    const text = views.renderStatusList(stats);
+    const opts = {
+      parse_mode: 'HTML',
+      reply_markup: buildStatusListKeyboard(stats),
+    };
+    if (edit) {
+      await safeEditMessageText(ctx, text, opts);
+    } else {
+      await ctx.reply(text, opts);
     }
   };
+
+  bot.use(createChatGuard());
+  bot.use(session({ initial: () => ({ addRoom: { step: null, roomId: null, platform: null } }) }));
 
   bot.callbackQuery(/^tstatus:(\d+)/, async (ctx) => {
     const task = db.getTaskById(ctx.match[1]);
     if (!task) { await ctx.answerCallbackQuery('房间不存在'); return; }
     await ctx.answerCallbackQuery('正在加载…');
-    // 点进详情时刷一下该房间信息，保证封面/标题最新（最多等 3 秒）
     try {
       const manager = scheduler.getTaskManager?.(task);
       if (manager?.refreshRoomInfo) {
@@ -375,32 +398,32 @@ function createRelayBot(token = process.env.TG_TOKEN) {
           new Promise((resolve) => setTimeout(resolve, 3000)),
         ]);
       }
-    } catch (err) { /* 刷新失败就用缓存数据 */ }
+    } catch {}
     const entry = scheduler.getTrafficStats().find((s) => String(s.id) === ctx.match[1]);
     if (!entry) { await ctx.reply('房间不存在'); return; }
     const statusText = views.renderDetailedStatus([entry]);
     const roomInfo = entry.traffic?.roomInfo || {};
-    const backKb = new InlineKeyboard().text('⬅️ 返回房间列表', 'tstatus_back');
+    const detailKb = new InlineKeyboard()
+      .text('⚙️ 进入房间控制台', `manage:${entry.id}`)
+      .text('📸 实时截图', `screenshot:${entry.id}`)
+      .row()
+      .text('⬅️ 返回状态总览', 'tstatus_back');
     if (roomInfo.cover) {
-      // 添加时间戳防止 TG 缓存旧封面
       const coverUrl = roomInfo.cover.includes('?')
         ? `${roomInfo.cover}&t=${Date.now()}`
         : `${roomInfo.cover}?t=${Date.now()}`;
       try {
-        await ctx.replyWithPhoto(coverUrl, { caption: statusText, parse_mode: 'HTML', reply_markup: backKb });
+        await ephemeralPhoto(ctx, coverUrl, { caption: statusText, parse_mode: 'HTML', reply_markup: detailKb });
         return;
-      } catch (err) { /* 封面发送失败就降级为纯文本 */ }
+      } catch {}
     }
-    await ctx.reply(statusText, { parse_mode: 'HTML', reply_markup: backKb });
+    await ephemeralReply(ctx, statusText, { parse_mode: 'HTML', reply_markup: detailKb });
   });
 
   bot.callbackQuery('tstatus_back', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await showStatus(ctx);
+    await ctx.answerCallbackQuery('已刷新');
+    await showStatus(ctx, true);
   });
-
-  bot.use(createChatGuard());
-  bot.use(session({ initial: () => ({ addRoom: { step: null, roomId: null, platform: null } }) }));
 
   const showNotificationSettings = async (ctx) => {
     const settings = getNotificationSettings();
@@ -421,48 +444,74 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   bot.command('logs', async (ctx) => { await showLogs(ctx); });
 
   // ─── Bot API 10.4 Widget ───────────────────────────────────────────────────
-  // /widget 命令：发送 Widget，优雅降级到普通面板
+  // /widget 命令：发送 Widget；仅在真正不支持或报错时降级到普通面板并展示真实错误原因
   bot.command('widget', async (ctx) => {
     const system = getSystemInfo();
     const tasks = scheduler.getTrafficStats();
     const chatData = widgetHelper.buildChatData({ tasks, system });
+    const caption = widgetHelper.buildCaption({ tasks, system });
+    const fallbackDashboard = () => views.renderDashboard({
+      system,
+      stats: scheduler.getStats(),
+      recentErrors: getRecentErrors(),
+    });
+
+    if (ctx.chat?.type && ctx.chat.type !== 'private') {
+      await ctx.reply(
+        '⚠️ Telegram Bot API 10.4 目前仅支持在机器人私聊中使用 Widget（群组/频道暂不支持）\n\n' +
+        fallbackDashboard(),
+        { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+      );
+      return;
+    }
+
     try {
-      const sent = await widgetHelper.sendWidget(bot, ctx.chat.id, chatData);
+      const sent = await widgetHelper.sendWidget(bot, ctx.chat.id, chatData, { caption });
       // 记录 message_id，供定时推送 editMessageWidgetData
-      const msgId = sent?.result?.message_id ?? sent?.message_id;
+      const msgId = sent?.message_id ?? sent?.result?.message_id;
       if (msgId) {
         bot._widgetMessages = bot._widgetMessages || {};
         bot._widgetMessages[String(ctx.chat.id)] = msgId;
       }
     } catch (err) {
-      // 降级：老客户端 / 未支持 10.4 → 发普通面板
-      const isUnsupported = /not supported|unknown method|method not found|400/i.test(err?.message || '');
-      if (isUnsupported) {
-        await ctx.reply(
-          '⚠️ 当前 Telegram 客户端不支持 Widget（需 10.4+）\n\n' +
-          views.renderDashboard({ system, stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
-          { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
-        );
-      } else {
-        console.error('[widget] sendWidget 失败:', err.message);
-        await ctx.reply(`❌ Widget 发送失败: ${err.message}`);
-      }
+      const errMsg = err?.description || err?.message || '未知错误';
+      console.error('[widget] sendWidget 失败:', errMsg);
+      const isNotAllowed = /INPUT_MEDIA_WIDGET_NOT_ALLOWED/i.test(errMsg);
+      const isMethodMissing = /unknown method|method not found|not supported|404/i.test(errMsg);
+      const header = isNotAllowed
+        ? `⚠️ Telegram 正式环境暂未对当前 Bot 开放 Widget 权限（<code>${views.escapeHtml(errMsg)}</code>），需等待官方分批放行，或使用 Telegram Test Server（<code>TG_API_ENV=test</code>）测试`
+        : isMethodMissing
+          ? `⚠️ 当前 Bot API 环境或客户端不支持 Widget（${views.escapeHtml(errMsg)}）`
+          : `❌ Widget 发送失败：<code>${views.escapeHtml(errMsg)}</code>`;
+      await ctx.reply(
+        `${header}\n\n${fallbackDashboard()}`,
+        { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+      );
     }
   });
 
   // widget_query：用户在 Widget 里点了按钮
-  // grammy 1.42 类型白名单不含 widget_query，用 bot.use 手动分发
+  // grammy 1.42 类型白名单不含 widget_query，ctx.chat 为 undefined，需从 query.chat / query.from 提取
   bot.use(async (ctx, next) => {
     if (!ctx.update?.widget_query) return next();
-    const query = ctx.update?.widget_query;
-    if (!query) return;
+    const query = ctx.update.widget_query;
     const queryId = query.id;
+    const chatId = query.chat?.id ?? query.from?.id;
+    const messageId = query.message_id;
+    if (chatId && messageId) {
+      bot._widgetMessages = bot._widgetMessages || {};
+      bot._widgetMessages[String(chatId)] = messageId;
+    }
+
     let parsed = {};
     try { parsed = JSON.parse(query.data || '{}'); } catch {}
 
     const { i: taskId, a: action } = parsed;
 
-    if (action === 'tog') {
+    if (action === 'ref') {
+      await widgetHelper.answerWidgetQuery(bot, queryId, '🔄 已刷新').catch(() => {});
+      await _pushWidgetUpdate(chatId, messageId).catch(() => {});
+    } else if (action === 'tog') {
       // 切换任务开启/暂停
       const task = taskId ? db.getTaskById(String(taskId)) : null;
       if (!task) {
@@ -472,11 +521,15 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       const newStatus = task.status === 'ENABLED' ? 'DISABLED' : 'ENABLED';
       db.updateTaskStatus(task.id, newStatus);
       await scheduler.tick?.();
-      await widgetHelper.answerWidgetQuery(bot, queryId,
-        newStatus === 'ENABLED' ? `▶ 已开启 ${views.platformLabel(task.platform)} #${task.room_id}` : `■ 已停止 ${views.platformLabel(task.platform)} #${task.room_id}`
+      await widgetHelper.answerWidgetQuery(
+        bot,
+        queryId,
+        newStatus === 'ENABLED'
+          ? `▶ 已开启 ${views.platformLabel(task.platform)} #${task.room_id}`
+          : `■ 已停止 ${views.platformLabel(task.platform)} #${task.room_id}`
       ).catch(() => {});
       // 推送更新后的 chat_data
-      await _pushWidgetUpdate(ctx.chat?.id).catch(() => {});
+      await _pushWidgetUpdate(chatId, messageId).catch(() => {});
     } else if (action === 'snap') {
       // 截图
       const task = taskId ? db.getTaskById(String(taskId)) : null;
@@ -490,27 +543,36 @@ function createRelayBot(token = process.env.TG_TOKEN) {
         return;
       }
       await widgetHelper.answerWidgetQuery(bot, queryId, '📷 正在截图...').catch(() => {});
-      try {
-        const imageBuffer = await manager.captureSnapshot();
-        await bot.api.sendPhoto(
-          ctx.chat.id,
-          new InputFile(imageBuffer, `snap_${task.room_id}.jpg`),
-          { caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 当前画面` }
-        );
-      } catch (err) {
-        await bot.api.sendMessage(ctx.chat.id, `截图失败: ${err.message}`).catch(() => {});
+      if (chatId) {
+        try {
+          const imageBuffer = await manager.captureSnapshot();
+          await ephemeralPhoto(
+            null,
+            new InputFile(imageBuffer, `snap_${task.room_id}.jpg`),
+            {
+              chatId,
+              receiverUserId: query.from?.id,
+              caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 当前画面`,
+            }
+          );
+        } catch (err) {
+          await bot.api.sendMessage(chatId, `截图失败: ${err.message}`).catch(() => {});
+        }
       }
     } else {
       await widgetHelper.answerWidgetQuery(bot, queryId, '').catch(() => {});
     }
   }); // end bot.use widget_query
 
+  const showFfmpegParams = async (ctx) => {
+    const stats = scheduler.getTrafficStats();
+    await ephemeralReply(ctx, views.renderFfmpegParams(stats), { parse_mode: 'HTML' });
+  };
+
   bot.hears('📺 管理面板', showDashboard);
   bot.hears('📊 推流状态', showStatus);
-  bot.hears('🛠️ FFmpeg 参数', async (ctx) => {
-    const stats = scheduler.getTrafficStats();
-    await ctx.reply(views.renderFfmpegParams(stats), { parse_mode: 'HTML' });
-  });
+  bot.hears('🛠️ FFmpeg 参数', showFfmpegParams);
+  bot.command('ffmpeg', showFfmpegParams);
   bot.hears('🔔 通知管理', showNotificationSettings);
 
 
@@ -525,24 +587,6 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       reply_markup: buildNotificationKeyboard(settings),
     });
   });
-
-  // Bot API 10.4：ephemeral 回复辅助（只有点按钮的用户可见，不刷屏）
-  // 若旧客户端不支持则降级到普通 answerCallbackQuery
-  async function ephemeralReply(ctx, text) {
-    try {
-      await bot.api.raw.sendMessage({
-        chat_id: ctx.chat.id,
-        text,
-        callback_query_id: ctx.callbackQuery?.id,
-      });
-    } catch (err) {
-      // 旧客户端不认识 callback_query_id 参数，降级
-      if (/bad request|unknown field/i.test(err?.message || '')) {
-        await ctx.reply(text).catch(() => {});
-      }
-    }
-    await ctx.answerCallbackQuery().catch(() => {});
-  }
 
   bot.callbackQuery(/^alert_retry:(.+)/, async (ctx) => {
     const task = db.getTaskById(ctx.match[1]);
@@ -583,12 +627,13 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.answerCallbackQuery('正在截图…');
     try {
       const imageBuffer = await manager.captureSnapshot();
-      await ctx.replyWithPhoto(
+      await ephemeralPhoto(
+        ctx,
         new InputFile(imageBuffer, `alert_${task.room_id}.jpg`),
         { caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 当前画面` }
       );
     } catch (err) {
-      await ctx.reply(`截图失败: ${err.message || '未知错误'}`);
+      await ephemeralReply(ctx, `截图失败: ${err.message || '未知错误'}`);
     }
   });
 
@@ -635,7 +680,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
       { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
     );
-    await ctx.reply(ok ? '☁️ 已成功同步到 Gist' : '❌ 同步失败，请检查日志');
+    await ephemeralReply(ctx, ok ? '☁️ 已成功同步到 Gist' : '❌ 同步失败，请检查日志');
   });
 
   bot.callbackQuery('global_restore_gist', async (ctx) => {
@@ -646,22 +691,46 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.answerCallbackQuery('⏳ 正在从 Gist 恢复...');
     const ok = await gistSync.downloadDefault();
     if (ok) {
-      scheduler.stopAll();
-      await scheduler.tick?.();
+      await scheduler.stopAll();
+      scheduler.start();
     }
     await safeEditMessageText(
       ctx,
       views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }),
       { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
     );
-    await ctx.reply(ok ? '📥 已从 Gist 恢复，任务已重启' : '❌ 恢复失败，请检查日志');
+    await ephemeralReply(ctx, ok ? '📥 已从 Gist 恢复，任务已重启' : '❌ 恢复失败，请检查日志');
   });
 
   bot.callbackQuery('global_toggle_transcode', async (ctx) => {
     const newValue = db.getSetting('transcode_video') === '1' ? '0' : '1';
     db.setSetting('transcode_video', newValue);
-    await ctx.answerCallbackQuery(`${newValue === '1' ? '✅ 转码已开启' : '⚪ 转码已关闭'}（重启任务后生效）`);
+    await ctx.answerCallbackQuery(`${newValue === '1' ? '✅ 视频转码已开启' : '⚪ 视频转码已关闭'}（重启任务后生效）`);
     await safeEditMessageText(ctx, views.renderDashboard({ system: getSystemInfo(), stats: scheduler.getStats(), recentErrors: getRecentErrors() }), { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() });
+  });
+
+  // #2：全局音频重编码修复（-c:v copy -c:a aac -b:a 128k -ar 48000 -ac 2）
+  bot.callbackQuery('global_toggle_audio_fix', async (ctx) => {
+    const newValue = db.getSetting('transcode_audio') === '1' ? '0' : '1';
+    db.setSetting('transcode_audio', newValue);
+    await ctx.answerCallbackQuery(
+      newValue === '1'
+        ? '✅ 已开启音频修复：视频保持 Copy，音频标准化为 AAC 48kHz 双声道'
+        : '⚪ 已关闭全局音频修复（恢复双流 Copy）'
+    );
+    await refreshDashboard(ctx);
+  });
+
+  // #6：配置变更时自动向 Telegram 聊天窗推送 .json 备份文件
+  bot.callbackQuery('global_toggle_auto_backup', async (ctx) => {
+    const newValue = db.getSetting('auto_tg_backup') === '0' ? '1' : '0';
+    db.setSetting('auto_tg_backup', newValue);
+    await ctx.answerCallbackQuery(
+      newValue === '1'
+        ? '✅ 已开启：增删改房间后自动推送备份文件到聊天窗'
+        : '⚪ 已关闭自动推送备份（仍可随时点「📤 导出备份文件」）'
+    );
+    await refreshDashboard(ctx);
   });
 
   // #14：每日定时维护重启开关（默认早上10点，推流中自动顺延1小时）
@@ -673,6 +742,184 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     const hour = db.getSetting('daily_restart_hour') || db.getSetting('nightly_restart_hour') || '10';
     await ctx.answerCallbackQuery(newValue === '1' ? `✅ 每日自动维护已开启（每天 ${hour} 点，推流中自动顺延 1 小时）` : '⛔ 每日自动维护已关闭');
     await refreshDashboard(ctx);
+  });
+
+  // 维护时间选择器（一键切换每日维护小时）
+  bot.callbackQuery('global_set_restart_hour', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const currentHour = String(db.getSetting('daily_restart_hour') || db.getSetting('nightly_restart_hour') || '10');
+    const hours = ['4', '6', '8', '10', '12', '14', '16', '22'];
+    const kb = new InlineKeyboard();
+    hours.forEach((h, idx) => {
+      const label = h === currentHour ? `✅ ${h}:00` : `${h}:00`;
+      kb.text(label, `restart_hour:${h}`);
+      if ((idx + 1) % 4 === 0) kb.row();
+    });
+    kb.text('⬅️ 返回面板', 'log_back');
+    await safeEditMessageText(
+      ctx,
+      `<b>⏰ 设置每日自动维护重启时间</b>\n\n当前设置：<b>每天 ${currentHour}:00</b>（若该时刻正在推流，将自动顺延 1 小时再检查）\n\n请点击下方时间切换：`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    );
+  });
+
+  bot.callbackQuery(/^restart_hour:(\d+)$/, async (ctx) => {
+    const hour = ctx.match[1];
+    db.setSetting('daily_restart_hour', hour);
+    db.setSetting('nightly_restart_hour', hour);
+    await ctx.answerCallbackQuery(`✅ 已将每日维护时间设为 ${hour}:00`);
+    await refreshDashboard(ctx);
+  });
+
+  // ─── Telegram 聊天室一键导出/导入 JSON 备份文件 ──────────────────────────
+  const exportBackupToChat = async (ctx) => {
+    const rooms = gistSync.exportRooms(db);
+    const settings = db.getAllSettings?.() || {};
+    const snapshot = {
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      rooms,
+      settings,
+    };
+    const jsonContent = JSON.stringify(snapshot, null, 2);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `streamops-backup-${dateStr}.json`;
+    const cookieRooms = rooms.filter((r) => r.cookie).length;
+    const totalTargets = rooms.reduce((sum, r) => sum + (r.targets?.length || 0), 0);
+
+    await ctx.replyWithDocument(
+      new InputFile(Buffer.from(jsonContent, 'utf8'), filename),
+      {
+        caption:
+          `📦 <b>StreamOps 全量配置备份</b>\n\n` +
+          `🏠 房间数量：<b>${rooms.length}</b> 个（含独立Cookie房间 ${cookieRooms} 个）\n` +
+          `📤 推流线路：<b>${totalTargets}</b> 条\n` +
+          `⚙️ 全局设置：<b>${Object.keys(settings).length}</b> 项\n\n` +
+          `<i>💡 恢复方法：随时将此 .json 文件直接发送或转发回本聊天窗口，即可一键还原全部房间与推流配置！</i>`,
+        parse_mode: 'HTML',
+      }
+    );
+  };
+
+  bot.command('backup', exportBackupToChat);
+
+  bot.callbackQuery('global_export_backup', async (ctx) => {
+    await ctx.answerCallbackQuery('正在生成备份文件...');
+    try {
+      await exportBackupToChat(ctx);
+    } catch (err) {
+      await ctx.reply(`❌ 导出备份失败：${err.message}`);
+    }
+  });
+
+  bot.callbackQuery('global_import_backup', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      `📥 <b>导入 JSON 备份文件</b>\n\n` +
+      `请直接向本窗口发送或转发之前导出的 <code>.json</code> 备份文件（支持 <code>streamops-backup-*.json</code> 或 Gist 的 <code>rooms.json</code>）：\n\n` +
+      `<i>💡 发送文件后系统将自动校验并热重载所有房间、主备 RTMP 密钥、房间独立 Cookie 与全局设置。</i>`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // 监听用户直接发送/转发到聊天窗的 .json 备份文件，自动完成一键导入还原
+  bot.on('message:document', async (ctx) => {
+    const doc = ctx.message?.document;
+    if (!doc) return;
+    const fileName = String(doc.file_name || '').toLowerCase();
+    const mimeType = String(doc.mime_type || '').toLowerCase();
+    if (!fileName.endsWith('.json') && !mimeType.includes('json')) {
+      await ctx.reply('❌ 仅支持导入 <code>.json</code> 格式的备份文件。', { parse_mode: 'HTML' });
+      return;
+    }
+    if (doc.file_size && doc.file_size > 2 * 1024 * 1024) {
+      await ctx.reply('❌ 备份文件体积过大（超过 2MB），已拒绝导入。');
+      return;
+    }
+
+    try {
+      const fileInfo = await ctx.getFile();
+      if (!fileInfo?.file_path) {
+        throw new Error('无法获取 Telegram 文件下载路径');
+      }
+      const fileUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
+      const res = await http.get(fileUrl, { responseType: 'text' });
+      const rawText = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+      const parsed = JSON.parse(rawText);
+
+      const isValidArray = Array.isArray(parsed);
+      const isValidObj = parsed && typeof parsed === 'object' && (Array.isArray(parsed.rooms) || typeof parsed.settings === 'object');
+      if (!isValidArray && !isValidObj) {
+        throw new Error('JSON 结构无效：缺少 rooms 数组或 settings 配置');
+      }
+
+      await scheduler.stopAll();
+      const result = gistSync.importRoomsIntoDb(db.getDatabase(), parsed);
+      db.onWrite?.();
+      scheduler.start();
+
+      await ctx.reply(
+        `✅ <b>备份文件导入成功！</b>\n\n` +
+        `📄 文件名：<code>${views.escapeHtml(doc.file_name || 'backup.json')}</code>\n` +
+        `🏠 恢复房间：<b>${result.importedRooms}</b> 个\n` +
+        `📤 恢复线路：<b>${result.importedTargets}</b> 条\n` +
+        `⚙️ 恢复设置：<b>${result.importedSettings}</b> 项\n\n` +
+        `🚀 调度器已自动热重载所有启用中的监控任务。`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      await ctx.reply(`❌ 导入备份失败：${err.message}`);
+    }
+  });
+
+  // 快捷命令 /cookie [房间号] [Cookie内容]：支持按房间号直接设置独立 Cookie（B站/斗鱼/抖音通用）
+  bot.command('cookie', async (ctx) => {
+    const raw = String(ctx.message?.text || '').replace(/^\/cookie\s*/i, '').trim();
+    const tasks = db.getAllTasks();
+    if (!raw) {
+      if (tasks.length === 0) {
+        await ctx.reply('当前还没有已创建的房间。请先「➕ 添加房间」，然后在「🏠 房间管理」中点击对应房间设置独立 Cookie。');
+        return;
+      }
+      const kb = new InlineKeyboard();
+      tasks.forEach((t) => {
+        const badge = t.cookie ? '✅ 已配Cookie' : '⚪ 未配置';
+        kb.text(`${views.platformLabel(t.platform)} #${t.room_id} (${badge})`, `editcookie:${t.id}`).row();
+      });
+      await ctx.reply(
+        `🍪 <b>房间独立 Cookie 管理</b>\n\n` +
+        `点击下方房间即可单独设置或清除该房间的 Cookie（B站不同房间可绑定不同账号 Cookie 解锁原画/防风控，抖音/斗鱼同理）。\n\n` +
+        `也可以直接发送指令：\n<code>/cookie 房间号 你的Cookie字符串</code>`,
+        { parse_mode: 'HTML', reply_markup: kb }
+      );
+      return;
+    }
+
+    // 解析 /cookie 房间号 Cookie内容
+    const firstSpace = raw.indexOf(' ');
+    if (firstSpace > 0) {
+      const candidateRoomId = raw.slice(0, firstSpace).trim();
+      const cookieValue = raw.slice(firstSpace + 1).trim();
+      const targetTask = tasks.find((t) => String(t.room_id) === candidateRoomId);
+      if (targetTask && cookieValue) {
+        db.updateTaskCookie(targetTask.id, cookieValue);
+        const latestTask = db.getTaskById(targetTask.id);
+        await scheduler.refreshTask?.(latestTask || targetTask);
+        await ctx.reply(
+          `✅ 已为 <b>${views.escapeHtml(views.platformLabel(targetTask.platform))} #${views.escapeHtml(targetTask.room_id)}</b> 绑定独立 Cookie：\n<code>${views.escapeHtml(cookieValue)}</code>\n\n⚙️ 已自动重启该房间监控任务。`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+    }
+
+    // 兜底：若直接传了整段 Cookie 且未指定房间号，存入默认 douyin_cookie
+    db.setSetting('douyin_cookie', raw);
+    ctx.session.setCookie = null;
+    await ctx.reply(
+      `✅ 已更新全局默认抖音 Cookie：\n<code>${views.escapeHtml(raw)}</code>\n\n<i>💡 提示：如需为特定 B站/斗鱼/抖音房间单独绑定 Cookie，请进入「🏠 房间管理」→ 点击房间 → 点击「🍪 房间Cookie」。</i>`,
+      { parse_mode: 'HTML' }
+    );
   });
 
   // #11：故障自动切回主线路开关
@@ -695,13 +942,40 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   bot.callbackQuery('global_test_notify', async (ctx) => {
     await ctx.answerCallbackQuery('已发送测试通知');
     const now = new Date().toLocaleString('zh-CN', { hour12: false });
-    await ctx.reply(`📩 <b>测试通知</b>\nTG 通知通道正常 ✅\n🕐 ${now}`, { parse_mode: 'HTML' });
+    await ephemeralReply(ctx, `📩 <b>测试通知</b>\nTG 通知通道正常 ✅\n🕐 ${now}`, { parse_mode: 'HTML' });
   });
 
   // #10：查日志
   bot.callbackQuery('global_view_logs', async (ctx) => {
     await ctx.answerCallbackQuery();
     await showLogs(ctx);
+  });
+
+  // 查看 FFmpeg 参数（面板按钮触发，支持临时消息展示）
+  bot.callbackQuery('global_ffmpeg_params', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showFfmpegParams(ctx);
+  });
+
+  // 一键下载并切换至最新静态版 FFmpeg (./bin/ffmpeg)，无需填 .env
+  bot.callbackQuery('global_update_ffmpeg', async (ctx) => {
+    await ctx.answerCallbackQuery('⬇️ 正在后台下载最新静态版 FFmpeg，请稍候...');
+    try {
+      const res = await ffmpegInstaller.downloadLatestFfmpeg({ logger: console });
+      getFfmpegMeta(true);
+      await refreshDashboard(ctx);
+      await ephemeralReply(
+        ctx,
+        `✅ <b>FFmpeg 已升级到最新静态版！</b>\n\n` +
+        `🎬 当前版本：<code>${views.escapeHtml(res.version)}</code>\n` +
+        `📦 来源：<code>${views.escapeHtml(res.source)}</code>\n` +
+        `📍 路径：<code>${views.escapeHtml(res.binPath)}</code>\n\n` +
+        `<i>💡 .env 中的 FFMPEG_PATH 保持留空即可，系统已自动优先调用此内置最新版（新开播或点击「🧹 清理重启」后全面生效）。</i>`,
+        { parse_mode: 'HTML' }
+      );
+    } catch (err) {
+      await ephemeralReply(ctx, `❌ 自动升级 FFmpeg 失败：${views.escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+    }
   });
 
   bot.callbackQuery('log_refresh', async (ctx) => {
@@ -717,7 +991,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   bot.callbackQuery('log_back', async (ctx) => {
     await ctx.answerCallbackQuery();
-    await showDashboard(ctx);
+    await refreshDashboard(ctx);
   });
 
   roomHandlers.register(bot, sharedDeps);
@@ -725,9 +999,9 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 
   // ─── Widget 定时推送辅助 ───────────────────────────────────────────────────
   // 供 widget_query handler 和外部定时器调用：向已打开的 Widget 推送最新数据
-  async function _pushWidgetUpdate(chatId) {
+  async function _pushWidgetUpdate(chatId, overrideMsgId = null) {
     if (!chatId) return;
-    const msgId = bot._widgetMessages?.[String(chatId)];
+    const msgId = overrideMsgId || bot._widgetMessages?.[String(chatId)];
     if (!msgId) return;
     const system = getSystemInfo();
     const tasks = scheduler.getTrafficStats();
@@ -735,8 +1009,8 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     try {
       await widgetHelper.editWidgetData(bot, chatId, msgId, chatData);
     } catch (err) {
-      // message_id 失效（消息已删除）→ 清理记录
-      if (/message.*not found|bad request/i.test(err?.message || '')) {
+      // message_id 失效（消息已删除 / 会话不存在）→ 清理记录；"message is not modified" 已在 editWidgetData 内忽略
+      if (/message.*not found|message to edit not found|chat not found/i.test(err?.message || '')) {
         delete bot._widgetMessages[String(chatId)];
       }
     }
@@ -749,29 +1023,30 @@ function createRelayBot(token = process.env.TG_TOKEN) {
 }
 
 const defaultBot = createRelayBot();
-defaultBot.pendingNotifications = [];
 
 defaultBot.handleManagerNotification = function(notification) {
-  const { taskId, type, message } = notification;
+  const { taskId, type, message, force = false } = notification;
   const task = taskId ? db.getTaskById(taskId) : null;
   if (taskId && !task) return;
-  if (!isNotificationEnabled(type)) return;
+  if (!force && !isNotificationEnabled(type)) return;
 
-  // 告警去重：
-  // - error / ffmpeg_error / 监控告警类：同任务同类型 10 分钟内只发一次
-  //   （之前按整条消息原文比对，ffmpeg 报错里带变化的 stderr 从未命中，等于没去重）
-  // - 状态变化类（开播/下播/结束）：沿用整条消息比对，避免漏掉真实的状态翻转
+  // 告警去重与状态翻转追踪：
+  // - error / ffmpeg_error / 监控告警类：同任务同类型 10 分钟内只发一次（带 force: true 的熔断告警绝不吞掉）
+  // - 生命周期状态翻转类（live_start / offline / stream_ended）：按任务追踪当前状态，
+  //   状态翻转时立刻放行（一天开播多次、标题不变也能次次收到开播与下播通知），仅屏蔽连续重复状态
   const alertTypes = ['error', 'ffmpeg_error', 'output_failed', 'black_screen', 'bitrate_drop', 'failover', 'resource'];
+  const lifecycleTypes = ['live_start', 'offline', 'stream_ended'];
   const key = `${taskId || 'global'}-${type}`;
   if (alertTypes.includes(type)) {
     const now = Date.now();
     if (!this._lastNotifiedAt) this._lastNotifiedAt = {};
-    if (now - (this._lastNotifiedAt[key] || 0) < 10 * 60 * 1000) return;
+    if (!force && now - (this._lastNotifiedAt[key] || 0) < 10 * 60 * 1000) return;
     this._lastNotifiedAt[key] = now;
-  } else {
-    if (this._lastNotified?.[key] === message) return;
-    if (!this._lastNotified) this._lastNotified = {};
-    this._lastNotified[key] = message;
+  } else if (lifecycleTypes.includes(type)) {
+    const taskKey = String(taskId || 'global');
+    if (!this._lastLifecycleState) this._lastLifecycleState = {};
+    if (!force && this._lastLifecycleState[taskKey] === type) return;
+    this._lastLifecycleState[taskKey] = type;
   }
 
   const label = task ? `${views.platformLabel(task.platform)} #${task.room_id}` : '系统';
@@ -826,6 +1101,46 @@ defaultBot.handleManagerNotification = function(notification) {
   };
 
   sendToAll();
+};
+
+// #6：当房间配置发生变更时，自动将最新 JSON 备份文件推送到白名单管理员私聊
+defaultBot.sendAutoBackupToChat = async function(store = db) {
+  if (store.getSetting?.('auto_tg_backup') === '0') return false;
+  const chatIds = parseAllowedChatId();
+  if (!chatIds || !chatIds.size || typeof this.api?.sendDocument !== 'function') return false;
+
+  const rooms = gistSync.exportRooms(store);
+  const settings = store.getAllSettings?.() || {};
+  const snapshot = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    rooms,
+    settings,
+  };
+  const jsonContent = JSON.stringify(snapshot, null, 2);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const filename = `streamops-backup-${dateStr}.json`;
+  const cookieRooms = rooms.filter((r) => r.cookie).length;
+  const totalTargets = rooms.reduce((sum, r) => sum + (r.targets?.length || 0), 0);
+
+  for (const chatId of chatIds) {
+    try {
+      await this.api.sendDocument(
+        chatId,
+        new InputFile(Buffer.from(jsonContent, 'utf8'), filename),
+        {
+          caption:
+            `💾 <b>配置变更自动备份</b>\n` +
+            `🏠 房间：<b>${rooms.length}</b> 个（独立Cookie ${cookieRooms} 个）｜📤 线路：<b>${totalTargets}</b> 条\n` +
+            `<i>直接转发此 .json 文件回本窗口即可一键恢复</i>`,
+          parse_mode: 'HTML',
+        }
+      );
+    } catch (err) {
+      console.error(`自动备份推送失败 (chat: ${chatId}):`, err.message);
+    }
+  }
+  return true;
 };
 
 module.exports = defaultBot;

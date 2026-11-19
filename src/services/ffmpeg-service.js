@@ -1,4 +1,5 @@
-const { spawn } = require('child_process');
+const { spawn } = require('node:child_process');
+const config = require('../config');
 
 class FFmpegService {
   constructor({
@@ -8,11 +9,12 @@ class FFmpegService {
     inputHeaders = {},
     globalOutputOptions = [],
     transcodeVideo = false,
+    transcodeAudio = false,
     onStart = () => {},
     onProgress = () => {},
     onError = () => {},
     onEnd = () => {},
-    onOutputFailed = () => {}, // 某一路 tee 输出目标断开时回调 (targetUrl, reason)
+    onOutputFailed = () => {},
   }) {
     this.roomId = roomId;
     this.targetUrls = Array.isArray(targetUrls) && targetUrls.length > 0
@@ -21,12 +23,13 @@ class FFmpegService {
     this.inputHeaders = inputHeaders;
     this.globalOutputOptions = globalOutputOptions;
     this.transcodeVideo = transcodeVideo;
+    this.transcodeAudio = transcodeAudio;
     this.onStart = onStart;
     this.onProgress = onProgress;
     this.onError = onError;
     this.onEnd = onEnd;
     this.onOutputFailed = onOutputFailed;
-    this.failedOutputs = new Set(); // 本会话已上报断开的目标，避免重复告警
+    this.failedOutputs = new Set();
 
     this.ffmpegCommand = null;
     this.stoppedManually = false;
@@ -36,12 +39,10 @@ class FFmpegService {
       sessionBytes: 0,
       bitrateKbps: 0,
       updatedAt: null,
+      lastProgressAt: null,
       startedAt: null,
     };
   }
-
-  enableStats() { return true; }
-  disableStats() { return true; }
 
   buildInputOptions(streamUrl) {
     const preInput = ['-loglevel', 'warning', '-stats', '-nostdin'];
@@ -53,15 +54,16 @@ class FFmpegService {
         '-reconnect_at_eof', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
-        '-analyzeduration', '1000000',
-        '-probesize', '1000000'
+        '-rw_timeout', config.ffmpeg.rwTimeoutUs,
+        '-fflags', 'nobuffer+discardcorrupt',
+        '-analyzeduration', config.ffmpeg.analyzeDuration,
+        '-probesize', config.ffmpeg.probeSize
       );
-      postInput.push('-fflags', 'nobuffer+discardcorrupt', '-rw_timeout', '10000000');
     }
 
     const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
     if (headerEntries.length > 0) {
-      const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
+      const headerString = `${headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n`;
       preInput.push('-headers', headerString);
     }
 
@@ -69,18 +71,28 @@ class FFmpegService {
   }
 
   buildOutputOptions() {
-    const options = this.transcodeVideo
+    const videoOpts = this.transcodeVideo
       ? [
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
+          '-c:v', config.ffmpeg.videoCodec,
+          '-preset', config.ffmpeg.videoPreset,
           '-tune', 'zerolatency',
-          '-crf', '23',
-          '-maxrate', '3000k',
-          '-bufsize', '6000k',
-          '-c:a', 'aac',
-          '-b:a', '128k'
+          '-crf', config.ffmpeg.videoCrf,
+          '-maxrate', config.ffmpeg.videoMaxrate,
+          '-bufsize', config.ffmpeg.videoBufsize,
+          ...(config.ffmpeg.threads > 0 ? ['-threads', String(config.ffmpeg.threads)] : []),
         ]
-      : ['-c:v', 'copy', '-c:a', 'copy'];
+      : ['-c:v', 'copy'];
+
+    const audioOpts = (this.transcodeVideo || this.transcodeAudio)
+      ? [
+          '-c:a', config.ffmpeg.audioCodec,
+          '-b:a', config.ffmpeg.audioBitrate,
+          '-ar', '48000',
+          '-ac', '2',
+        ]
+      : ['-c:a', 'copy'];
+
+    const options = [...videoOpts, ...audioOpts];
 
     if (Array.isArray(this.globalOutputOptions)) {
       options.push(...this.globalOutputOptions);
@@ -90,6 +102,9 @@ class FFmpegService {
 
   start(streamUrl) {
     if (!streamUrl) throw new Error('缺少输入流地址');
+    if (!this.targetUrls || this.targetUrls.length === 0) {
+      throw new Error('缺少推流目标地址');
+    }
 
     if (this.ffmpegCommand) {
       this.stop();
@@ -97,8 +112,14 @@ class FFmpegService {
 
     this.stoppedManually = false;
     this.streamUrl = streamUrl;
-    this.failedOutputs = new Set(); // 新会话：输出断开记录清零
-    this.trafficStats.startedAt = new Date().toISOString();
+    this.failedOutputs = new Set();
+    this.trafficStats = {
+      sessionBytes: 0,
+      bitrateKbps: 0,
+      updatedAt: null,
+      lastProgressAt: null,
+      startedAt: new Date().toISOString(),
+    };
 
     const { preInput, postInput } = this.buildInputOptions(streamUrl);
     const outputOpts = this.buildOutputOptions();
@@ -113,31 +134,32 @@ class FFmpegService {
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
     } else {
-      // onfail=ignore：一路目标挂了不断整条链，其他路继续推
-      const tee = this.targetUrls.map(t => `[f=flv:onfail=ignore]${t}`).join('|');
+      const tee = this.targetUrls.map((t) => `[f=flv:onfail=ignore]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
 
-    const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
     this.lastArgs = [ffmpegPath, ...args];
     const proc = spawn(ffmpegPath, args);
 
     this.stderrBuffer = [];
 
-    proc.stderr.on('data', data => {
+    proc.stderr.on('data', (data) => {
+      if (this.ffmpegCommand !== proc) return;
       const text = data.toString();
-      text.split('\n').forEach(line => {
+      text.split(/[\r\n]+/).forEach((line) => {
         const trimmed = line.trim();
-        if (trimmed) {
-          this.parseStderrProgress(trimmed);
-          this.parseOutputErrors(trimmed);
+        if (!trimmed) return;
+        const isProgress = this.parseStderrProgress(trimmed);
+        this.parseOutputErrors(trimmed);
+        if (!isProgress) {
           this.stderrBuffer.push(trimmed);
-          if (this.stderrBuffer.length > 10) this.stderrBuffer.shift();
+          if (this.stderrBuffer.length > 15) this.stderrBuffer.shift();
         }
       });
     });
 
-    proc.on('error', err => {
+    proc.on('error', (err) => {
       if (this.ffmpegCommand !== proc) return;
       this.ffmpegCommand = null;
       this.onError(err);
@@ -147,9 +169,10 @@ class FFmpegService {
       if (this.ffmpegCommand !== proc) return;
       this.ffmpegCommand = null;
       if (this.stoppedManually) return;
-      if (code !== 0 && code !== null) {
+      if (signal || (code !== 0 && code !== null)) {
         const lastErrors = this.stderrBuffer.join('\n');
-        const errorMsg = `FFmpeg exited with code ${code}${lastErrors ? `:\n${lastErrors}` : ''}`;
+        const reason = signal ? `signal ${signal}` : `code ${code}`;
+        const errorMsg = `FFmpeg exited with ${reason}${lastErrors ? `:\n${lastErrors}` : ''}`;
         this.onError(new Error(errorMsg));
       } else {
         this.onEnd();
@@ -161,19 +184,22 @@ class FFmpegService {
     return proc;
   }
 
-  // 解析 tee 多路输出里某一路目标的报错：
-  // 形如 "[tee @ 0x..] Slave '[f=flv:onfail=ignore]rtmp://host/app/key': Error ..."，
-  // onfail=ignore 会让 FFmpeg 默默跳过坏路，这里把它揪出来告警
   parseOutputErrors(line) {
     if (!/slave/i.test(line) || !/error|fail/i.test(line)) return;
     const m = line.match(/Slave '([^']+)'/i);
     if (!m) return;
-    // 去掉 tee 的 [f=flv:onfail=ignore] 前缀，还原真实目标地址
     const raw = m[1].replace(/^\[[^\]]+\]/, '');
-    const target = this.targetUrls.find(t => raw === t || raw.includes(t) || t.includes(raw));
+    const target = this.targetUrls.find((t) => raw === t || raw.includes(t) || t.includes(raw));
     const key = target || raw;
-    if (this.failedOutputs.has(key)) return; // 本会话已报过
+    if (this.failedOutputs.has(key)) return;
     this.failedOutputs.add(key);
+
+    if (this.targetUrls.length > 1 && this.failedOutputs.size >= this.targetUrls.length) {
+      this.stop();
+      this.onError(new Error('所有 RTMP 推流目标线路均已断开'));
+      return;
+    }
+
     try {
       this.onOutputFailed(target || raw, line);
     } catch {}
@@ -182,7 +208,7 @@ class FFmpegService {
   async captureFrame(streamUrl, options = {}) {
     if (!streamUrl) throw new Error('流地址不可用');
 
-    const timeout = options.timeout || 20000;
+    const timeout = options.timeout || config.ffmpeg.snapshotTimeoutMs;
     return new Promise((resolve, reject) => {
       const chunks = [];
 
@@ -190,13 +216,13 @@ class FFmpegService {
         '-loglevel', 'error',
         '-nostdin',
         '-ss', '0',
-        '-analyzeduration', '1000000',
-        '-probesize', '1000000',
+        '-analyzeduration', config.ffmpeg.analyzeDuration,
+        '-probesize', config.ffmpeg.probeSize,
       ];
 
       const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
       if (headerEntries.length > 0) {
-        const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
+        const headerString = `${headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n`;
         preInput.push('-headers', headerString);
       }
 
@@ -209,7 +235,7 @@ class FFmpegService {
       ];
 
       const args = [...preInput, '-i', streamUrl, ...outputOpts, '-'];
-      const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+      const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
       const proc = spawn(ffmpegPath, args);
 
       const timeoutHandle = setTimeout(() => {
@@ -217,7 +243,7 @@ class FFmpegService {
         reject(new Error(`截图超时 (${timeout}ms)`));
       }, timeout);
 
-      proc.stdout.on('data', chunk => chunks.push(chunk));
+      proc.stdout.on('data', (chunk) => chunks.push(chunk));
 
       proc.on('exit', (code) => {
         clearTimeout(timeoutHandle);
@@ -229,15 +255,13 @@ class FFmpegService {
         }
       });
 
-      proc.on('error', err => {
+      proc.on('error', (err) => {
         clearTimeout(timeoutHandle);
         reject(err);
       });
     });
   }
 
-  // 停止 FFmpeg：先 SIGINT 给 5 秒自己收尾，不走再 SIGKILL；
-  // 返回 Promise，进程真正退出（或 10 秒兜底）后 resolve，优雅关闭时 await 用
   stop() {
     if (!this.ffmpegCommand) return Promise.resolve();
     this.stoppedManually = true;
@@ -256,29 +280,44 @@ class FFmpegService {
       cmdRef.on('exit', done);
       try {
         cmdRef.kill('SIGINT');
-      } catch (e) {
+      } catch {
         done();
         return;
       }
-      // SIGKILL 兜底绑在局部变量上，不再存 this.killTimeout：
-      // 之前 start() 里会清掉它，导致上一个进程的 SIGKILL 被取消、僵尸残留
-      const killTimer = setTimeout(() => { try { cmdRef.kill('SIGKILL'); } catch (e) {} }, 5000);
+      const killTimer = setTimeout(() => {
+        try {
+          cmdRef.kill('SIGKILL');
+        } catch {}
+      }, 5000);
       const waitTimer = setTimeout(done, 10000);
     });
   }
 
   parseStderrProgress(line) {
+    let matched = false;
+    const nowMs = Date.now();
     const bitrateMatch = line.match(/bitrate=\s*(\d+\.?\d*)\s*kbits?\/s/i);
     if (bitrateMatch) {
       this.trafficStats.bitrateKbps = parseFloat(bitrateMatch[1]);
-      this.trafficStats.updatedAt = new Date().toISOString();
+      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
+      this.trafficStats.lastProgressAt = nowMs;
+      matched = true;
+    } else if (/bitrate=\s*N\/A/i.test(line)) {
+      this.trafficStats.bitrateKbps = 0;
+      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
+      matched = true;
     }
-    // 解析累计输出字节：ffmpeg -stats 行形如 "size=    1234KiB"
-    const sizeMatch = line.match(/size=\s*(\d+)KiB/i);
+    const sizeMatch = line.match(/size=\s*(\d+)\s*(?:KiB|kB)/i);
     if (sizeMatch) {
       this.trafficStats.sessionBytes = parseInt(sizeMatch[1], 10) * 1024;
-      this.trafficStats.updatedAt = new Date().toISOString();
+      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
+      this.trafficStats.lastProgressAt = nowMs;
+      matched = true;
     }
+    if (!matched && /^(?:frame|size)=\s*\d+/i.test(line)) {
+      matched = true;
+    }
+    return matched;
   }
 
   getTrafficStats() {
@@ -289,8 +328,6 @@ class FFmpegService {
     };
   }
 
-  // 黑帧检测：拉一段流，用 blackdetect 滤镜看是否长时间黑屏
-  // 返回 true = 疑似黑屏；false = 画面正常；抛错 = 检测失败（不告警）
   async detectBlackFrame(streamUrl, options = {}) {
     if (!streamUrl) throw new Error('流地址不可用');
     const analyzeSeconds = options.seconds || 20;
@@ -300,26 +337,25 @@ class FFmpegService {
     return new Promise((resolve, reject) => {
       const stderrLines = [];
       const preInput = [
-        '-loglevel', 'info', // blackdetect 的结果打在 info 级别日志里
+        '-loglevel', 'info',
         '-nostdin',
-        '-analyzeduration', '1000000',
-        '-probesize', '1000000',
+        '-analyzeduration', config.ffmpeg.analyzeDuration,
+        '-probesize', config.ffmpeg.probeSize,
       ];
 
       const headerEntries = Object.entries(this.inputHeaders).filter(([, v]) => v);
       if (headerEntries.length > 0) {
-        const headerString = headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n');
+        const headerString = `${headerEntries.map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n`;
         preInput.push('-headers', headerString);
       }
 
-      // 连续 15 秒黑帧才判定为事故级黑屏，排除正常游戏读图/转场；pix_th=0.10：亮度低于 10% 视为黑
       const args = [
         ...preInput, '-i', streamUrl,
         '-vf', `blackdetect=d=${blackDuration}:pix_th=0.10`,
         '-an', '-t', String(analyzeSeconds),
         '-f', 'null', '-',
       ];
-      const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+      const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
       const proc = spawn(ffmpegPath, args);
 
       const timeoutHandle = setTimeout(() => {
@@ -327,7 +363,7 @@ class FFmpegService {
         reject(new Error(`黑帧检测超时 (${timeout}ms)`));
       }, timeout);
 
-      proc.stderr.on('data', data => stderrLines.push(data.toString()));
+      proc.stderr.on('data', (data) => stderrLines.push(data.toString()));
 
       proc.on('exit', (code) => {
         clearTimeout(timeoutHandle);
@@ -339,7 +375,7 @@ class FFmpegService {
         resolve(/black_start/i.test(log));
       });
 
-      proc.on('error', err => {
+      proc.on('error', (err) => {
         clearTimeout(timeoutHandle);
         reject(err);
       });

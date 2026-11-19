@@ -1,24 +1,33 @@
 services:
   stream-to-rtmp:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_LATEST_FFMPEG: "1"
     image: stream-to-rtmp:latest
     container_name: stream-to-rtmp
+    init: true
     restart: unless-stopped
+    stop_grace_period: 20s
     env_file:
       - .env
     environment:
       NODE_ENV: production
-      FFMPEG_PATH: /usr/bin/ffmpeg
+      # 留空将优先使用镜像内置的最新官方版 /app/bin/ffmpeg，回退至系统 /usr/bin/ffmpeg
+      # 如需在容器里覆盖自定义二进制，可挂载宿主机路径并设置 FFMPEG_PATH
+      # FFMPEG_PATH: /usr/bin/ffmpeg
       DATABASE_PATH: /app/data/data.db
-      PORT: 8080
-      # 注意：服务默认只监听 127.0.0.1；对外开放时必须配置 DASHBOARD_TOKEN，
-      # 否则启动会被拒绝（见 main.js）
+      PORT: ${PORT:-3000}
+      # 对外开放 Web 面板时建议在 .env 配置 16 位以上的 DASHBOARD_TOKEN
       BIND_HOST: 0.0.0.0
     ports:
-      - "8080:8080"  # 健康检查端口
+      - "${PORT:-3000}:${PORT:-3000}"
     volumes:
       - ./data:/app/data
-    # 健康检查走 Dockerfile 里的 HEALTHCHECK（busybox wget），这里不再重复定义
+      # 若希望容器重建后保留在面板里“一键升级”的最新 FFmpeg，可取消下一行注释：
+      # - ./bin:/app/bin
+    # 若需限制单容器内存（housekeeping 会自动读取 cgroup 限额并精准告警）：
+    # mem_limit: 512m
     logging:
       driver: json-file
       options:

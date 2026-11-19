@@ -18,15 +18,16 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '25'
+          node-version: '26'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Syntax check
+      - name: Syntax check & Unit tests
         run: |
-          find . -name "*.js" -not -path "./node_modules/*" -exec node --check {} +
+          npm run lint
+          node --test test/*.test.js
           
       - name: 删除运行记录
         uses: Mattraks/delete-workflow-runs@main

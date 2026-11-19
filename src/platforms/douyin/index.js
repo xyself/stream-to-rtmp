@@ -1,7 +1,5 @@
-const axios = require('axios');
-
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-const DEFAULT_COOKIE = '__ac_nonce=0658d6780004b23f5d0a8;';
+const config = require('../../config');
+const http = require('../http');
 
 function getDouyinCookie() {
   try {
@@ -9,90 +7,127 @@ function getDouyinCookie() {
     const dbCookie = db.getSetting?.('douyin_cookie');
     if (dbCookie) return dbCookie;
   } catch {}
-  return process.env.DOUYIN_COOKIE || DEFAULT_COOKIE;
+  return config.http.douyinCookie;
+}
+
+function normalizeStreamUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  return url
+    .replace(/\\"/g, '"')
+    .replace(/\\\\u0026/g, '&')
+    .replace(/\\u0026/g, '&')
+    .replace(/\\\\/g, '')
+    .replace(/^http:\/\//i, 'https://');
+}
+
+/**
+ * 从抖音直播间 SSR HTML 中解析房间状态与流地址：
+ * 优先解析内嵌 JSON 对象（支持字段顺序任意变化），回退到转义匹配。
+ */
+function parseDouyinRoomHtml(html = '') {
+  const source = String(html || '');
+
+  // 尝试反转义 SSR payload（常见于 self.__pace_f.push([1,"..."])）
+  const unescaped = source
+    .replace(/\\"/g, '"')
+    .replace(/\\\\u0026/g, '&')
+    .replace(/\\u0026/g, '&');
+
+  // 提取 room 块字段（不依赖 id_str / status / title 相对顺序）
+  const roomAnchorIdx = unescaped.indexOf('"room":{');
+  const roomWindow = roomAnchorIdx >= 0 ? unescaped.slice(roomAnchorIdx, roomAnchorIdx + 12000) : unescaped;
+
+  const statusMatch = roomWindow.match(/"status"\s*:\s*(\d+)/);
+  const titleMatch = roomWindow.match(/"title"\s*:\s*"([^"]*)"/);
+  const idMatch = roomWindow.match(/"id_str"\s*:\s*"(\d+)"/);
+
+  if (!statusMatch || (!idMatch && !titleMatch)) {
+    throw new Error('未能匹配到房间信息，页面结构可能已变更');
+  }
+
+  const isLive = statusMatch[1] === '2';
+  const title = titleMatch ? titleMatch[1] : '';
+
+  const userMatch = unescaped.match(/"(?:user|owner)"\s*:\s*\{[^{}]*?"nickname"\s*:\s*"([^"]+)"/);
+  const hostName = userMatch ? userMatch[1] : '';
+
+  const coverMatch = unescaped.match(/"cover"\s*:\s*\{[^{}]*?"url_list"\s*:\s*\[\s*"([^"]+)"/);
+  const cover = coverMatch ? normalizeStreamUrl(coverMatch[1]) : '';
+
+  let m3u8 = null;
+  const hlsMatch = unescaped.match(/"hls_pull_url_map"\s*:\s*(\{[^{}]+\})/);
+  if (hlsMatch) {
+    try {
+      const hlsMap = JSON.parse(hlsMatch[1]);
+      const candidate = hlsMap.FULL_HD1 || hlsMap.HD1 || Object.values(hlsMap)[0];
+      m3u8 = normalizeStreamUrl(candidate);
+    } catch {}
+  }
+
+  let flv = null;
+  const flvMapMatch = unescaped.match(/"flv_pull_url"\s*:\s*(\{[^{}]+\})/);
+  if (flvMapMatch) {
+    try {
+      const flvMap = JSON.parse(flvMapMatch[1]);
+      const candidate = flvMap.FULL_HD1 || flvMap.HD1 || Object.values(flvMap)[0];
+      flv = normalizeStreamUrl(candidate);
+    } catch {}
+  }
+  if (!flv) {
+    const flvSingleMatch = unescaped.match(/"flv"\s*:\s*"([^"]+)"/);
+    if (flvSingleMatch) {
+      flv = normalizeStreamUrl(flvSingleMatch[1]);
+    }
+  }
+
+  return { title, roomName: title, hostName, cover, flv, m3u8, streamUrl: flv || m3u8, isLive };
 }
 
 class DouyinEngine {
-  constructor() {
-    this.userAgent = DEFAULT_USER_AGENT;
-  }
-
-  getHeaders() {
+  getHeaders(overrideHeaders = {}) {
     return {
-      'User-Agent': this.userAgent,
-      'Cookie': getDouyinCookie(),
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'User-Agent': config.http.userAgent,
+      Cookie: getDouyinCookie(),
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      ...overrideHeaders,
     };
   }
 
-  async _fetchPageData(roomId) {
-    const res = await axios.get(`https://live.douyin.com/${roomId}`, {
-      timeout: 15000,
-      headers: this.getHeaders(),
+  async _fetchPageData(roomId, options = {}) {
+    const res = await http.get(`https://live.douyin.com/${roomId}`, {
+      headers: this.getHeaders(options.headers),
+      responseType: 'text',
     });
-    const html = res.data;
-
-    const roomMatch = html.match(/room\\":{.*?\\"id_str\\":\\"(\d+)\\".*?,\\"status\\":(\d+).*?"title\\":\\"([^"]*)\\"/);
-    if (!roomMatch) throw new Error('未能匹配到房间信息，页面结构可能已变更');
-
-    const [, , status, title] = roomMatch;
-    
-    // 提取主播昵称
-    const userMatch = html.match(/user\\":{.*?\\"nickname\\":\\"([^"]+)\\"/);
-    const hostName = userMatch ? userMatch[1].replace(/\\\\/g, '') : '';
-
-    // 提取封面图
-    const coverMatch = html.match(/cover\\":{.*?\\"url_list\\":\[\\"([^"]+)\\"/);
-    const cover = coverMatch ? coverMatch[1].replace(/\\\\u0026/g, '&').replace(/\\u0026/g, '&').replace(/\\\\/g, '') : '';
-
-    const isLive = status === '2';
-
-    let m3u8 = null;
-    const m3u8Match = html.match(/hls_pull_url_map\\":(\{.*?\})/);
-    if (m3u8Match) {
-      const hlsMap = JSON.parse(m3u8Match[1].replace(/\\"/g, '"'));
-      m3u8 = (hlsMap.FULL_HD1 || hlsMap.HD1 || Object.values(hlsMap)[0]).replace('http://', 'https://');
-    }
-
-    let flv = null;
-    const flvMatch = html.match(/flv\\":\\"(.*?)\\"/);
-    if (flvMatch) {
-      flv = flvMatch[1].replace(/\\"/g, '"').replace(/\\\\u0026/g, '&').replace(/\\u0026/g, '&').replace('http://', 'https://');
-    }
-
-    return { title, hostName, cover, flv, m3u8, isLive };
+    return parseDouyinRoomHtml(res.data);
   }
 
-  async getInfo(roomId) {
+  async getInfo(roomId, options = {}) {
     try {
-      const { title, hostName, cover, isLive } = await this._fetchPageData(roomId);
+      const { title, hostName, cover, isLive } = await this._fetchPageData(roomId, options);
       return { hostName, roomName: title, isLive, realId: roomId, cover };
     } catch (err) {
       throw new Error(`抖音解析失败: ${err.message}`);
     }
   }
 
-  async getStreamUrl(roomId) {
+  async getStreamUrls(roomId, options = {}) {
     try {
-      const { flv, m3u8, isLive } = await this._fetchPageData(roomId);
+      const { flv, m3u8, isLive } = await this._fetchPageData(roomId, options);
       if (!isLive) throw new Error('主播已下播');
-      const url = flv || m3u8;
-      if (!url) throw new Error('未找到可用流地址');
-      return url;
+      const urls = [...new Set([flv, m3u8].filter(Boolean))];
+      if (urls.length === 0) throw new Error('未找到可用流地址');
+      return urls;
     } catch (err) {
       throw new Error(`抖音解析失败: ${err.message}`);
     }
   }
 
-  getOptions(roomId) {
-    return {
-      headers: {
-        'User-Agent': this.userAgent,
-        'Cookie': getDouyinCookie(),
-        'Referer': `https://live.douyin.com/${roomId}`,
-      },
-    };
+  async getStreamUrl(roomId, options = {}) {
+    const urls = await this.getStreamUrls(roomId, options);
+    return urls[0];
   }
 }
 
 module.exports = new DouyinEngine();
+module.exports.DouyinEngine = DouyinEngine;
+module.exports.parseDouyinRoomHtml = parseDouyinRoomHtml;

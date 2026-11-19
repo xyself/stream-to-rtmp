@@ -1,19 +1,25 @@
-const BilibiliRoom = require('./bilibili/room');
-const DouyuRoom = require('./douyu/room');
-const DouyinRoom = require('./douyin/room');
+const BaseRoom = require('./base-room');
+const bilibiliEngine = require('./bilibili');
+const douyuEngine = require('./douyu');
+const douyinEngine = require('./douyin');
 
-const registry = {
-  bilibili: BilibiliRoom,
-  douyu: DouyuRoom,
-  douyin: DouyinRoom,
+const engines = {
+  bilibili: bilibiliEngine,
+  douyu: douyuEngine,
+  douyin: douyinEngine,
 };
 
 function create(platform, roomId, options = {}) {
-  const RoomClass = registry[platform];
-  if (!RoomClass) {
+  const engine = engines[platform];
+  if (!engine) {
     throw new Error(`Unsupported platform: ${platform}`);
   }
-  return new RoomClass(roomId, options);
+  return new BaseRoom({
+    roomId,
+    engine,
+    platform,
+    ...options,
+  });
 }
 
-module.exports = { create, registry };
+module.exports = { create, engines };

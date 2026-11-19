@@ -6,8 +6,13 @@ yarn-error.log*
 .git
 .gitignore
 .env
+bin/
 data.db
 data.db-*
 data/
 logs/
 coverage/
+test/
+docs/
+workspace/
+.aistudio/

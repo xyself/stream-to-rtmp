@@ -28,8 +28,9 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
     if (!task) { await ctx.reply(`❌ 未找到房间 ${roomId} 对应的任务。`); return; }
     try {
       for (const url of targetUrls) { db.addTarget(task.id, url); }
-      await scheduler.tick?.();
-      await ctx.reply(`✅ 已为房间 ${roomId} 增加 ${targetUrls.length} 条 RTMP/RTMPS。`);
+      const latestTask = db.getTaskById(task.id);
+      await scheduler.refreshTask?.(latestTask || task);
+      await ctx.reply(`✅ 已为房间 ${roomId} 增加 ${targetUrls.length} 条 RTMP/RTMPS，已自动重载推流。`);
     } catch (err) {
       await ctx.reply(`❌ 增加 RTMP 失败：${err.message}`);
     }
@@ -42,8 +43,9 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
     await ctx.answerCallbackQuery();
     const currentUrl = task.primary_target_url || task.target_url || '未配置';
     await ctx.reply(
-      `✏️ 修改推流地址\n\n房间：${views.platformLabel(task.platform)} #${task.room_id}\n\n` +
-      `当前主推流地址：\n\`\`\`\n${currentUrl}\n\`\`\`\n\n请发送新的 RTMP/RTMPS 推流地址：`
+      `✏️ 修改推流地址\n\n房间：${views.escapeHtml(views.platformLabel(task.platform))} #${views.escapeHtml(task.room_id)}\n\n` +
+      `当前主推流地址：\n<code>${views.escapeHtml(currentUrl)}</code>\n\n请发送新的 RTMP/RTMPS 推流地址：`,
+      { parse_mode: 'HTML' }
     );
     ctx.session.editRtmp = { step: 'wait_new_url', taskId, startedAt: Date.now() };
   });
@@ -88,12 +90,13 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
     try {
       db.deleteTargetById(taskId, targetId);
       await ctx.answerCallbackQuery('已删除');
-      const task = db.getTaskById(taskId);
-      if (!task) { await safeEditMessageText(ctx, '任务已不存在'); return; }
-      await scheduler.refreshTask?.(task);
+      const rawTask = db.getTaskById(taskId);
+      if (!rawTask) { await safeEditMessageText(ctx, '任务已不存在'); return; }
+      await scheduler.refreshTask?.(rawTask);
+      const hydratedTask = scheduler.getTrafficStats?.().find((t) => String(t.id) === String(taskId)) || rawTask;
       await safeEditMessageText(ctx,
-        views.renderTaskDetail(task, scheduler.isTaskRunning(task)),
-        { parse_mode: 'HTML', reply_markup: buildTaskDetailKeyboard(task) }
+        views.renderTaskDetail(hydratedTask, scheduler.isTaskRunning(hydratedTask)),
+        { parse_mode: 'HTML', reply_markup: buildTaskDetailKeyboard(hydratedTask) }
       );
     } catch (err) {
       await ctx.answerCallbackQuery({ text: `删除失败：${err.message}`, show_alert: true });
@@ -117,8 +120,9 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
         const latestTask = db.getTaskById(editRtmpState.taskId);
         await scheduler.refreshTask?.(latestTask || task);
         await ctx.reply(
-          `✅ 推流地址已更新\n\n房间：${views.platformLabel(task.platform)} #${task.room_id}\n\n` +
-          `新主推流地址：\n\`\`\`\n${text}\n\`\`\`\n\n⚙️ 已自动重启推流任务。`
+          `✅ 推流地址已更新\n\n房间：${views.escapeHtml(views.platformLabel(task.platform))} #${views.escapeHtml(task.room_id)}\n\n` +
+          `新主推流地址：\n<code>${views.escapeHtml(text)}</code>\n\n⚙️ 已自动重启推流任务。`,
+          { parse_mode: 'HTML' }
         );
         ctx.session.editRtmp = null;
       } catch (err) {
@@ -140,18 +144,19 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
       if (!task) { await ctx.reply('❌ 任务已不存在'); ctx.session.addRtmp = null; return; }
       try {
         for (const url of urls) { db.addTarget(task.id, url); }
-        await scheduler.tick?.();
+        const latestTask = db.getTaskById(task.id);
+        await scheduler.refreshTask?.(latestTask || task);
         const message = [
-          '✅ 备用推流地址已添加',
+          '✅ 备用推流地址已添加并自动热重载',
           '',
-          `房间：${views.platformLabel(task.platform)} #${task.room_id}`,
+          `房间：${views.escapeHtml(views.platformLabel(task.platform))} #${views.escapeHtml(task.room_id)}`,
           `新增线路：${urls.length} 条`,
           '',
           '📋 全部推流地址：',
         ];
         const allUrls = views.getTargetUrls(db.getTaskById(addRtmpState.taskId) || task);
-        allUrls.forEach((url, idx) => { message.push(`${idx + 1}. ${views.maskTargetUrl(url)}`); });
-        await ctx.reply(message.join('\n'));
+        allUrls.forEach((url, idx) => { message.push(`${idx + 1}. <code>${views.escapeHtml(url)}</code>`); });
+        await ctx.reply(message.join('\n'), { parse_mode: 'HTML' });
         ctx.session.addRtmp = null;
       } catch (err) {
         await ctx.reply(`❌ 添加失败：${err.message}`);
