@@ -220,3 +220,90 @@ test('runtimeEnv detects Serv00 with /bin/devil and /home/user path', () => {
   assert.equal(serv00.kind, 'serv00');
   assert.equal(serv00.isServ00, true);
 });
+
+test('views.renderDashboard accurately formats Serv00 quotas and suppresses fake errors', () => {
+  const views = require('../src/bot/views');
+  const rendered = views.renderDashboard({
+    system: {
+      uptime: '15m 30s',
+      runtimeLabel: 'Serv00 FreeBSD',
+      nodeVersion: 'v26.12.1',
+      cpuPercent: 0.5,
+      cpuBar: '░░░░░░░░░░',
+      cpuLabel: 'Serv00 配额',
+      memUsed: '168.00 MB',
+      memTotal: '512.00 MB',
+      memPct: 33,
+      memLabel: 'Serv00 配额 512MB',
+      disk: {
+        used: '49.00 MB',
+        total: '3.00 GB',
+        pct: 2,
+        label: 'Serv00 配额 3.0GB',
+      },
+      processes: {
+        used: 7,
+        limit: 20,
+        pct: 35,
+      },
+      serviceMem: '102.50 MB',
+      heapUsed: '16.20 MB',
+      ffmpegVersion: '6.1.2',
+    },
+    stats: {
+      totalTasks: 4,
+      enabledTasks: 3,
+      disabledTasks: 1,
+      activeStreams: 0,
+      totalMonitoring: 3,
+      totalTargets: 4,
+    },
+    recentErrors: [],
+  });
+
+  assert.ok(rendered.includes('Serv00 FreeBSD · Node v26.12.1'));
+  assert.ok(rendered.includes('CPU：[░░░░░░░░░░] 0.5% (Serv00 配额)'));
+  assert.ok(rendered.includes('RAM：168.00 MB / 512.00 MB (33% · Serv00 配额 512MB)'));
+  assert.ok(rendered.includes('DISK：49.00 MB / 3.00 GB (2% · Serv00 配额 3.0GB)'));
+  assert.ok(rendered.includes('PROC：7 / 20 进程 (35% · 限额 20)'));
+  assert.ok(rendered.includes('SVC：服务占用 102.50 MB (V8堆 16.20 MB)'));
+  assert.ok(rendered.includes('🟢 <b>状态诊断</b>：全链路正常运行，无错误告警'));
+  assert.ok(!rendered.includes('⚠️ 最近警告'));
+});
+
+test('bot.getSystemInfo and getRecentErrors correctly handle Serv00 quota and filter STREAM_ENDED', () => {
+  const bot = require('../src/bot');
+  const mockLimits = {
+    disk: { usePct: 1.59, usedMB: 49, limitMB: 3072, raw: '49.0M/3.0G' },
+    memory: { usePct: 33, usedMB: 168, limitMB: 512, raw: '168.0M/512.0M' },
+    processes: { usePct: 35, used: 7, limit: 20 },
+    cpu: { usePct: 0.5 },
+  };
+
+  const sys = bot.getSystemInfo({
+    memStats: housekeeping.getMemoryStats({ serv00Limits: mockLimits }),
+    cpuPercent: 0.5,
+    diskStats: housekeeping.getDiskStats(process.cwd(), { serv00Limits: mockLimits }),
+    runtime: { isServ00: true, isFreeBSD: true },
+  });
+
+  assert.equal(sys.runtimeLabel, 'Serv00 FreeBSD');
+  assert.equal(sys.memTotal, '512.00 MB');
+  assert.equal(sys.memUsed, '168.00 MB');
+  assert.equal(sys.memPct, 33);
+  assert.equal(sys.memLabel, 'Serv00 配额 512MB');
+  assert.equal(sys.disk.total, '3.00 GB');
+  assert.equal(sys.processes.limit, 20);
+  assert.equal(sys.processes.used, 7);
+
+  // 验证 STREAM_ENDED 被过滤
+  const views = require('../src/bot/views');
+  const db = require('../src/db');
+  db.getAllTasks = () => [
+    { platform: 'bilibili', room_id: '123', last_error: 'STREAM_ENDED' },
+    { platform: 'douyu', room_id: '456', last_error: 'OFFLINE' },
+    { platform: 'douyin', room_id: '789', last_error: 'FFMPEG_CRASH' },
+  ];
+  const errors = bot.getRecentErrors();
+  assert.deepEqual(errors, ['[抖音 #789] FFMPEG_CRASH']);
+});

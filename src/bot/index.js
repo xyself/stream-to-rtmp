@@ -12,6 +12,8 @@ const gistSync = require('../db/gist-sync');
 const http = require('../platforms/http');
 const widgetHelper = require('./widget');
 const ffmpegInstaller = require('../services/ffmpeg-installer');
+const housekeeping = require('../core/housekeeping');
+const runtimeEnv = require('../core/runtime-env');
 const {
   safeEditMessageText,
   sendEphemeralMessage,
@@ -67,6 +69,8 @@ function buildDashboardKeyboard() {
   const liveSnapshotOn = db.getSetting?.('live_snapshot') === '1';
   const autoBackupOn = db.getSetting?.('auto_tg_backup') !== '0';
   const hour = db.getSetting?.('daily_restart_hour') || db.getSetting?.('nightly_restart_hour') || '10';
+  const isFreeBsdOrServ00 = process.platform === 'freebsd' || Boolean(process.env.SERV00);
+
   const keyboard = new InlineKeyboard()
     .text('▶️ 全部开启', 'global_enable_all')
     .text('🛑 全部暂停', 'global_disable_all')
@@ -88,7 +92,7 @@ function buildDashboardKeyboard() {
     .row()
     .text('📜 查日志', 'global_view_logs')
     .text('🛠️ FFmpeg 参数', 'global_ffmpeg_params')
-    .text('⬆️ 升级FFmpeg', 'global_update_ffmpeg')
+    .text(isFreeBsdOrServ00 ? 'ℹ️ FFmpeg 说明' : '⬆️ 升级FFmpeg', isFreeBsdOrServ00 ? 'global_ffmpeg_info' : 'global_update_ffmpeg')
     .row()
     .text('📤 导出备份文件', 'global_export_backup')
     .text('📥 导入备份文件', 'global_import_backup')
@@ -184,34 +188,71 @@ function buildAlertKeyboard(taskId) {
     .text('📺 查看详情', `alert_detail:${taskId}`);
 }
 
-function getSystemInfo() {
-  const cpus = os.cpus();
-  const loadAvg = os.loadavg()[0];
-  const cpuCount = cpus.length || 1;
-  const cpuPercent = Math.min(100, Math.round((loadAvg / cpuCount) * 100));
-  const totalMem = os.totalmem();
-  const usedMem = totalMem - os.freemem();
-  
-  // 核心服务占用
-  const serviceMem = process.memoryUsage().rss;
-  
+function getSystemInfo(opts = {}) {
+  const memStats = opts.memStats || housekeeping.getMemoryStats();
+  const cpuPercent = opts.cpuPercent != null ? opts.cpuPercent : housekeeping.getSystemCpuPct();
+  const diskStats = opts.diskStats !== undefined ? opts.diskStats : housekeeping.getDiskStats();
+  const runtime = opts.runtime || runtimeEnv.getRuntimeProfile();
+
+  const memUsage = process.memoryUsage();
+  const serviceMem = memUsage.rss;
+  const heapUsed = memUsage.heapUsed;
+
   let dbSize = null;
   try {
     const stat = fs.statSync(db.resolveDatabasePath());
     dbSize = views.formatBytes(stat.size);
   } catch {}
-  
-  const memPct = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
-  const ffMeta = getFfmpegMeta();
+
+  const ffMeta = opts.ffMeta || getFfmpegMeta();
+
+  let memLabel = '物理内存';
+  if (memStats.source === 'serv00') {
+    memLabel = 'Serv00 配额 512MB';
+  } else if (memStats.source && memStats.source.startsWith('cgroup')) {
+    memLabel = '容器配额';
+  }
+
+  let diskLabel = '磁盘';
+  if (diskStats?.source === 'serv00') {
+    diskLabel = 'Serv00 配额 3.0GB';
+  }
+
+  let runtimeLabel = 'Linux';
+  if (runtime.isServ00) {
+    runtimeLabel = 'Serv00 FreeBSD';
+  } else if (runtime.isFreeBSD) {
+    runtimeLabel = 'FreeBSD';
+  } else if (runtime.isContainer) {
+    runtimeLabel = runtime.isMusl ? 'Docker Alpine (musl)' : 'Docker Linux';
+  }
+
   return {
-    cpuPercent,
+    cpuPercent: Math.round(cpuPercent * 10) / 10,
     cpuBar: views.progressBar(cpuPercent),
-    memUsed: views.formatBytes(usedMem),
-    memTotal: views.formatBytes(totalMem),
-    memPct,
+    cpuLabel: memStats.source === 'serv00' ? 'Serv00 配额' : null,
+    memUsed: views.formatBytes(memStats.usedMB * 1024 * 1024),
+    memTotal: views.formatBytes(memStats.limitMB * 1024 * 1024),
+    memPct: memStats.sysUsePct,
+    memLabel,
+    memSource: memStats.source,
+    disk: diskStats ? {
+      used: views.formatBytes(diskStats.usedMB * 1024 * 1024),
+      total: views.formatBytes(diskStats.limitMB * 1024 * 1024),
+      pct: diskStats.usePct,
+      label: diskLabel,
+    } : null,
+    processes: memStats.processes ? {
+      used: memStats.processes.used,
+      limit: memStats.processes.limit,
+      pct: memStats.processes.usePct,
+    } : null,
     serviceMem: views.formatBytes(serviceMem),
+    heapUsed: views.formatBytes(heapUsed),
     uptime: views.formatUptime(process.uptime()),
     dbSize,
+    runtimeLabel,
+    nodeVersion: process.version,
     ffmpegVersion: ffMeta.version,
     ffmpegPath: ffMeta.resolvedPath,
     ffmpegSource: ffMeta.source,
@@ -222,8 +263,9 @@ function getSystemInfo() {
 }
 
 function getRecentErrors() {
+  const nonErrors = new Set(['STREAM_ENDED', 'OFFLINE', 'NORMAL_EXIT', 'NO_STREAM']);
   return db.getAllTasks()
-    .filter((t) => t.last_error)
+    .filter((t) => t.last_error && !nonErrors.has(t.last_error))
     .map((t) => `[${views.platformLabel(t.platform)} #${t.room_id}] ${t.last_error}`);
 }
 
@@ -957,8 +999,32 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await showFfmpegParams(ctx);
   });
 
+  // FreeBSD / Serv00 原生编译版说明
+  bot.callbackQuery('global_ffmpeg_info', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ephemeralReply(
+      ctx,
+      `ℹ️ <b>FreeBSD / Serv00 原生 FFmpeg 说明</b>\n\n` +
+      `当前系统运行在 FreeBSD 环境下，使用系统预装的原生动态链接版本 <code>/usr/local/bin/ffmpeg</code> (6.1.2)。\n\n` +
+      `💡 <b>为什么无需也不能升级为网络静态包？</b>\n` +
+      `1. 网络上的静态包均为 Linux glibc 二进制，无法直接在 FreeBSD 内核执行；\n` +
+      `2. stream-to-rtmp 默认采用原生音视频流直推 (<code>-c copy</code>)，FFmpeg 6.1.2 极其稳定且 CPU 占用近乎为零，是 Serv00 环境下的最优解。`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
   // 一键下载并切换至最新静态版 FFmpeg (./bin/ffmpeg)，无需填 .env
   bot.callbackQuery('global_update_ffmpeg', async (ctx) => {
+    if (process.platform === 'freebsd' || Boolean(process.env.SERV00)) {
+      await ctx.answerCallbackQuery();
+      await ephemeralReply(
+        ctx,
+        `ℹ️ <b>FreeBSD / Serv00 原生 FFmpeg 说明</b>\n\n` +
+        `当前为 FreeBSD/Serv00 环境，系统预装的 <code>/usr/local/bin/ffmpeg</code> (6.1.2) 为原生动态链接版本，采用 <code>-c copy</code> 极稳零损耗，无需且无法使用 Linux glibc 静态包。`,
+        { parse_mode: 'HTML' }
+      );
+      return;
+    }
     await ctx.answerCallbackQuery('⬇️ 正在后台下载最新静态版 FFmpeg，请稍候...');
     try {
       const res = await ffmpegInstaller.downloadLatestFfmpeg({ logger: console });

@@ -202,15 +202,37 @@ function renderDeleteConfirm(task) {
 function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
   const lines = [
     `<b>📊 全局控制台</b>（运行：${escapeHtml(system.uptime || '未知')}）`,
-    '',
-    `<b>🖥️服务器状态</b>`,
-    `  CPU：[${system.cpuBar || '░░░░░░░░░░'}] ${system.cpuPercent ?? 0}%`,
-    `  RAM：${escapeHtml(system.memUsed || '?')} / ${escapeHtml(system.memTotal || '?')}`,
-    `  SVC：服务占用 ${escapeHtml(system.serviceMem || '?')}`,
   ];
 
+  if (system.runtimeLabel || system.nodeVersion) {
+    const envTag = system.runtimeLabel ? escapeHtml(system.runtimeLabel) : 'Linux';
+    const nodeTag = system.nodeVersion ? ` · Node ${escapeHtml(system.nodeVersion)}` : '';
+    lines.push(`🌐 环境：<code>${envTag}${nodeTag}</code>`);
+  }
+
+  lines.push('');
+  lines.push(`<b>🖥️ 服务器与配额状态</b>`);
+
+  const cpuExtra = system.cpuLabel ? ` (${escapeHtml(system.cpuLabel)})` : '';
+  lines.push(`  CPU：[${system.cpuBar || '░░░░░░░░░░'}] ${system.cpuPercent ?? 0}%${cpuExtra}`);
+
+  const ramExtra = system.memLabel ? ` (${system.memPct ?? 0}% · ${escapeHtml(system.memLabel)})` : (system.memPct != null ? ` (${system.memPct}%)` : '');
+  lines.push(`  RAM：${escapeHtml(system.memUsed || '?')} / ${escapeHtml(system.memTotal || '?')}${ramExtra}`);
+
+  if (system.disk) {
+    const diskLabel = system.disk.label ? ` · ${escapeHtml(system.disk.label)}` : '';
+    lines.push(`  DISK：${escapeHtml(system.disk.used)} / ${escapeHtml(system.disk.total)} (${system.disk.pct}%${diskLabel})`);
+  }
+
+  if (system.processes) {
+    lines.push(`  PROC：${system.processes.used} / ${system.processes.limit} 进程 (${system.processes.pct}% · 限额 ${system.processes.limit})`);
+  }
+
+  const heapTag = system.heapUsed ? ` (V8堆 ${escapeHtml(system.heapUsed)})` : '';
+  lines.push(`  SVC：服务占用 ${escapeHtml(system.serviceMem || '?')}${heapTag}`);
+
   if (system.dbSize) {
-    lines.push(`  DB：${escapeHtml(system.dbSize)}`);
+    lines.push(`  DB：${escapeHtml(system.dbSize)} (SQLite)`);
   }
   if (system.ffmpegVersion) {
     const customBadge = system.ffmpegCustomBinary ? '✅ 自定义/内置' : 'ℹ️ 系统PATH';
@@ -233,6 +255,9 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
     recentErrors.slice(0, 5).forEach((err, idx) => {
       lines.push(`  ${idx + 1}. ${escapeHtml(err)}`);
     });
+  } else {
+    lines.push('');
+    lines.push(`🟢 <b>状态诊断</b>：全链路正常运行，无错误告警`);
   }
 
   return lines.join('\n');
