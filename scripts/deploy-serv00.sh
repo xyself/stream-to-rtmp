@@ -20,19 +20,31 @@ APP_DIR="$HOME/domains/stream-to-rtmp"
 REPO_URL="https://github.com/xyself/stream-to-rtmp.git"
 NODE_OPTS="--max-semi-space-size=2 --max-old-space-size=192 --v8-pool-size=2 --expose-gc"
 WATCHDOG_PATTERN="stream-to-rtmp/scripts/auto-start.sh"
-MAIN_PATTERN="stream-to-rtmp/main.js"
+MAIN_PATTERN="node.*main\.js"
 WATCHDOG_MARK="# stream-to-rtmp-watchdog"
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ---------- 0. 环境检查 ----------
-if command -v devil >/dev/null 2>&1; then
+if command -v devil >/dev/null 2>&1 || [ -x /bin/devil ] || [ -x /usr/local/devil/bin/devil ]; then
   log ">> 检测到 Serv00 环境，确保开启自定义二进制执行权限 (devil binexec on)..."
   devil binexec on >/dev/null 2>&1 || true
 fi
 
-command -v node >/dev/null 2>&1 || die "没找到 node，请先装好 Node.js (>= 22)"
+NODE_BIN=""
+for candidate in node26 node25 node24 node22 node; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    cand_major=$("$candidate" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+    case "$cand_major" in ''|*[!0-9]*) cand_major=0 ;; esac
+    if [ "$cand_major" -ge 22 ]; then
+      NODE_BIN="$candidate"
+      break
+    fi
+  fi
+done
+
+[ -n "$NODE_BIN" ] || die "没找到可用 node，请先装好 Node.js (>= 22)"
 command -v git >/dev/null 2>&1 || die "没找到 git"
 command -v crontab >/dev/null 2>&1 || die "没找到 crontab"
 
@@ -45,9 +57,9 @@ for cand in "$HOME/bin/ffmpeg" "/usr/local/bin/ffmpeg" "$(command -v ffmpeg 2>/d
 done
 [ -n "$FFMPEG_FOUND" ] || die "没找到可用 ffmpeg（已检查 ~/bin/ffmpeg、/usr/local/bin/ffmpeg 与 PATH）"
 
-NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
-[ "$NODE_MAJOR" -ge 22 ] || die "node 版本过低 ($(node -v))，需要 >= 22"
-log "node: $(node -v) ($(command -v node))"
+NODE_MAJOR=$("$NODE_BIN" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+[ "$NODE_MAJOR" -ge 22 ] || die "node 版本过低 ($("$NODE_BIN" -v))，需要 >= 22"
+log "node: $("$NODE_BIN" -v) ($(command -v "$NODE_BIN"))"
 log "ffmpeg: $("$FFMPEG_FOUND" -version 2>/dev/null | head -n 1) ($FFMPEG_FOUND)"
 
 # ---------- 1. 拉代码 ----------

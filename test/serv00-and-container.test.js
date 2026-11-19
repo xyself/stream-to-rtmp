@@ -170,3 +170,53 @@ test('Serv00 shell scripts pass POSIX sh -n syntax validation', () => {
     assert.equal(res.status, 0, `${script} syntax error: ${res.stderr}`);
   }
 });
+
+test('runtimeEnv.parseDevilLimits correctly extracts disk, RAM, CPU, and process quota', () => {
+  const sampleOutput = `
+Resources utilization
+
+       Disk quota: [=====================================] 1.59% (48.8M/3.0G)
+        Processes: [=====================================] 35.00% (7/20)
+       RAM memory: [=====================================] 32.62% (167.0M/512.0M)
+              CPU: [=====================================] 0.50% (0.5/100)
+       Mails sent: [=====================================] 0.00% (0/500)
+  `;
+
+  const limits = runtimeEnv.parseDevilLimits(sampleOutput);
+  assert.ok(limits);
+  assert.equal(limits.disk.usePct, 1.59);
+  assert.equal(limits.disk.usedMB, 49);
+  assert.equal(limits.disk.limitMB, 3072);
+  assert.equal(limits.memory.usePct, 33);
+  assert.equal(limits.memory.usedMB, 167);
+  assert.equal(limits.memory.limitMB, 512);
+  assert.equal(limits.processes.used, 7);
+  assert.equal(limits.processes.limit, 20);
+  assert.equal(limits.cpu.usePct, 0.5);
+
+  const memStats = housekeeping.getMemoryStats({ serv00Limits: limits });
+  assert.equal(memStats.source, 'serv00');
+  assert.equal(memStats.limitMB, 512);
+  assert.equal(memStats.usedMB, 167);
+  assert.equal(memStats.sysUsePct, 33);
+
+  const diskStats = housekeeping.getDiskStats(process.cwd(), { serv00Limits: limits });
+  assert.equal(diskStats.source, 'serv00');
+  assert.equal(diskStats.limitMB, 3072);
+  assert.equal(diskStats.usePct, 2);
+
+  const cpuPct = housekeeping.getSystemCpuPct({ serv00Limits: limits });
+  assert.equal(cpuPct, 0.5);
+});
+
+test('runtimeEnv detects Serv00 with /bin/devil and /home/user path', () => {
+  const serv00 = runtimeEnv.getRuntimeProfile({
+    platform: 'freebsd',
+    arch: 'x64',
+    env: { HOME: '/home/chengua' },
+    existsFn: (p) => p === '/bin/devil',
+    readFileFn: () => null,
+  });
+  assert.equal(serv00.kind, 'serv00');
+  assert.equal(serv00.isServ00, true);
+});

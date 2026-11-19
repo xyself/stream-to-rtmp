@@ -3,7 +3,12 @@ const os = require('node:os');
 const config = require('../config');
 const db = require('../db');
 const views = require('../bot/views');
-const { getCgroupMemoryStats, getRuntimeProfile } = require('./runtime-env');
+const {
+  getCgroupMemoryStats,
+  getRuntimeProfile,
+  isServ00,
+  getServ00Limits,
+} = require('./runtime-env');
 
 function getZonedDateParts(ms = Date.now(), timeZone = config.timezone) {
   try {
@@ -52,12 +57,30 @@ function getZonedDateParts(ms = Date.now(), timeZone = config.timezone) {
 }
 
 /**
- * 获取当前服务内存与容器/系统内存占比（无需派生 ps aux 子进程）
+ * 获取当前服务内存与配额/系统内存占比
+ * - Serv00 环境：读取 512MB 账号配额，精准反映实际内存消耗与生存红线
  * - Linux 容器（存在 cgroup v1/v2 限额）：精准按容器内存配额计算使用率
  * - 常规宿主机：按 os.totalmem/os.freemem 计算系统内存使用率
  */
-function getMemoryStats({ cgroupStats = getCgroupMemoryStats() } = {}) {
+function getMemoryStats({ cgroupStats = getCgroupMemoryStats(), serv00Limits = undefined } = {}) {
   const rssMB = Math.round(process.memoryUsage().rss / (1024 * 1024));
+
+  // 1. Serv00 配额模式
+  const s00 = serv00Limits !== undefined ? serv00Limits : (isServ00() ? getServ00Limits() : null);
+  if (s00?.memory && s00.memory.limitMB > 0) {
+    return {
+      rssMB,
+      sysUsePct: s00.memory.usePct,
+      limitMB: s00.memory.limitMB,
+      usedMB: s00.memory.usedMB,
+      source: 'serv00',
+      processes: s00.processes || null,
+      cpuPct: s00.cpu?.usePct ?? null,
+      rawQuota: s00.memory.raw || null,
+    };
+  }
+
+  // 2. Linux 容器 cgroup 配额模式
   if (cgroupStats && cgroupStats.limitMB > 0) {
     return {
       rssMB,
@@ -67,6 +90,8 @@ function getMemoryStats({ cgroupStats = getCgroupMemoryStats() } = {}) {
       source: `cgroup-${cgroupStats.version}`,
     };
   }
+
+  // 3. 常规宿主机物理内存模式
   const totalSys = os.totalmem();
   const usedSys = totalSys - os.freemem();
   const sysUsePct = totalSys > 0 ? Math.round((usedSys / totalSys) * 100) : 0;
@@ -80,18 +105,64 @@ function getMemoryStats({ cgroupStats = getCgroupMemoryStats() } = {}) {
 }
 
 /**
- * 使用 Node 22 原生 fs.statfsSync 获取磁盘使用率（无需派生 df -k 子进程）
+ * 获取磁盘使用详情与使用率（Serv00 配额模式或原生 statfsSync）
  */
-function getDiskUsePct(targetPath = process.cwd()) {
+function getDiskStats(targetPath = process.cwd(), { serv00Limits = undefined } = {}) {
+  const s00 = serv00Limits !== undefined ? serv00Limits : (isServ00() ? getServ00Limits() : null);
+  if (s00?.disk) {
+    return {
+      usePct: Math.round(s00.disk.usePct),
+      usedMB: s00.disk.usedMB,
+      limitMB: s00.disk.limitMB,
+      source: 'serv00',
+      rawQuota: s00.disk.raw,
+    };
+  }
   try {
     if (typeof fs.statfsSync !== 'function') return null;
     const stat = fs.statfsSync(targetPath);
     const total = Number(stat.blocks) * Number(stat.bsize);
     const avail = Number(stat.bavail) * Number(stat.bsize);
     if (!Number.isFinite(total) || total <= 0) return null;
-    return Math.round(((total - avail) / total) * 100);
+    return {
+      usePct: Math.round(((total - avail) / total) * 100),
+      usedMB: Math.round((total - avail) / (1024 * 1024)),
+      limitMB: Math.round(total / (1024 * 1024)),
+      source: 'host',
+    };
   } catch {
     return null;
+  }
+}
+
+function getDiskUsePct(targetPath = process.cwd(), opts = {}) {
+  const stats = getDiskStats(targetPath, opts);
+  return stats ? stats.usePct : null;
+}
+
+let lastCpuCheck = { time: Date.now(), cpu: process.cpuUsage() };
+
+/**
+ * 获取当前系统/进程 CPU 使用率百分比
+ */
+function getSystemCpuPct({ serv00Limits = undefined } = {}) {
+  const s00 = serv00Limits !== undefined ? serv00Limits : (isServ00() ? getServ00Limits() : null);
+  if (s00?.cpu && typeof s00.cpu.usePct === 'number') {
+    return s00.cpu.usePct;
+  }
+  try {
+    const now = Date.now();
+    const elapsedMs = Math.max(1, now - lastCpuCheck.time);
+    const diff = process.cpuUsage(lastCpuCheck.cpu);
+    lastCpuCheck = { time: now, cpu: process.cpuUsage() };
+    const cpuTotalMs = (diff.user + diff.system) / 1000;
+    const cpus = os.cpus()?.length || 1;
+    const pct = Math.min(100, Math.round((cpuTotalMs / (elapsedMs * cpus)) * 100 * 10) / 10);
+    return pct;
+  } catch {
+    const load = os.loadavg?.()?.[0] || 0;
+    const cpus = os.cpus()?.length || 1;
+    return Math.min(100, Math.round((load / cpus) * 100));
   }
 }
 
@@ -332,5 +403,7 @@ module.exports = {
   startHousekeeping,
   getMemoryStats,
   getDiskUsePct,
+  getDiskStats,
+  getSystemCpuPct,
   getZonedDateParts,
 };

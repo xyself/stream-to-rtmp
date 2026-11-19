@@ -5,7 +5,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const config = require('./src/config');
 const ringLogger = require('./src/core/logger');
-const { getMemoryStats, getDiskUsePct } = require('./src/core/housekeeping');
+const { getMemoryStats, getDiskUsePct, getDiskStats, getSystemCpuPct } = require('./src/core/housekeeping');
 const curveChart = require('./src/core/curve-chart');
 const { restoreOnce } = require('./src/init/restore');
 const defaultDb = require('./src/db');
@@ -219,7 +219,9 @@ function createApp({
           const ffInfo = ffmpegInstaller.getFfmpegRuntimeInfo();
           const mem = process.memoryUsage();
           const memStats = getMemoryStats();
-          const diskPct = getDiskUsePct();
+          const diskStats = getDiskStats();
+          const diskPct = diskStats ? diskStats.usePct : getDiskUsePct();
+          const cpuPct = getSystemCpuPct();
 
           return sendJson(res, 200, {
             active: stats.activeStreams || 0,
@@ -237,8 +239,11 @@ function createApp({
               alertMb: config.housekeeping?.memAlertMb || 0,
               criticalMb: config.housekeeping?.criticalMemMb || 0,
             },
+            disk: diskStats,
             diskPct,
             diskAlertPct: config.housekeeping?.diskAlertPct || 85,
+            cpuPct,
+            processes: memStats.processes || null,
             runtimeEnv: config.runtime?.kind || process.platform,
             nodeVersion: process.version,
             ffmpegVersion: ffInfo.version || ffmpegVersion,

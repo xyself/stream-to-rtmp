@@ -14,18 +14,35 @@
 
 # ---- 补全 FreeBSD/Serv00 cron 精简环境下的 PATH ----
 export PATH="$HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-if [ -x /usr/local/bin/devil ]; then
+if command -v devil >/dev/null 2>&1 || [ -x /bin/devil ] || [ -x /usr/local/devil/bin/devil ] || [ -x /usr/local/bin/devil ]; then
   export SERV00=1
 fi
 
 cd "$(dirname "$0")/.." || exit 1
 
-# ---- 0. node 版本检查 ----
-if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: 没找到 node (PATH=$PATH)" >&2
-  exit 42
+# ---- 0. node 版本优选（按顺序检测最高版本：node26 -> node25 -> node24 -> node22 -> node）----
+NODE_BIN=""
+for candidate in node26 node25 node24 node22 node; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    cand_major=$("$candidate" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+    case "$cand_major" in ''|*[!0-9]*) cand_major=0 ;; esac
+    if [ "$cand_major" -ge 22 ]; then
+      NODE_BIN="$candidate"
+      break
+    fi
+  fi
+done
+
+if [ -z "$NODE_BIN" ]; then
+  if command -v node >/dev/null 2>&1; then
+    NODE_BIN="node"
+  else
+    echo "ERROR: 没找到 node (PATH=$PATH)" >&2
+    exit 42
+  fi
 fi
-NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+
+NODE_MAJOR=$("$NODE_BIN" -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
 case "$NODE_MAJOR" in ''|*[!0-9]*) NODE_MAJOR=0 ;; esac
 if [ "$NODE_MAJOR" -lt 22 ]; then
   echo "WARNING: node 版本为 v$NODE_MAJOR（需要 >= 22 以支持原生 node:sqlite），尝试继续启动…" >&2
@@ -76,11 +93,11 @@ while true; do
   fi
 
   rotate_log
-  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') 启动 node main.js ..." >> "$LOG_FILE"
-  node main.js >> "$LOG_FILE" 2>&1
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') 启动 $NODE_BIN main.js ..." >> "$LOG_FILE"
+  "$NODE_BIN" main.js >> "$LOG_FILE" 2>&1
   EXIT_CODE=$?
 
-  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') node 退出，退出码 $EXIT_CODE" >> "$LOG_FILE"
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $NODE_BIN 退出，退出码 $EXIT_CODE" >> "$LOG_FILE"
 
   # 正常退出 / 环境缺失：不再重启
   if [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 42 ]; then

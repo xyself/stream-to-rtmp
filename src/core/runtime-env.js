@@ -52,12 +52,14 @@ function isMuslLinux({
   if (platform !== 'linux') return false;
   if (existsFn('/etc/alpine-release')) return true;
   if (existsFn('/lib/ld-musl-x86_64.so.1') || existsFn('/lib/ld-musl-aarch64.so.1')) return true;
-  try {
-    const report = getReport();
-    if (report?.header && !report.header.glibcVersionRuntime) {
-      return true;
-    }
-  } catch {}
+  if (process.platform === 'linux') {
+    try {
+      const report = getReport();
+      if (report?.header && !report.header.glibcVersionRuntime) {
+        return true;
+      }
+    } catch {}
+  }
   return false;
 }
 
@@ -71,9 +73,119 @@ function isServ00({
 } = {}) {
   if (env.SERV00 === '1') return true;
   if (platform !== 'freebsd') return false;
-  if (existsFn('/usr/local/bin/devil')) return true;
+  if (
+    existsFn('/bin/devil') ||
+    existsFn('/usr/local/devil/bin/devil') ||
+    existsFn('/usr/local/bin/devil')
+  ) {
+    return true;
+  }
   const home = env.HOME || '';
-  return /^\/usr\/home\/[^/]+/.test(home);
+  return /^\/(usr\/)?home\/[^/]+/.test(home);
+}
+
+function toMB(val, unit) {
+  const n = parseFloat(val);
+  const u = (unit || 'M').toUpperCase();
+  if (u === 'G') return Math.round(n * 1024);
+  if (u === 'K') return Math.round(n / 1024);
+  if (u === 'T') return Math.round(n * 1024 * 1024);
+  return Math.round(n);
+}
+
+/**
+ * 解析 Serv00 devil info limits 终端输出
+ */
+function parseDevilLimits(output) {
+  if (!output || typeof output !== 'string') return null;
+  const res = {};
+
+  const diskMatch = output.match(/Disk quota:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
+  if (diskMatch) {
+    res.disk = {
+      usePct: parseFloat(diskMatch[1]),
+      usedMB: toMB(diskMatch[2], diskMatch[3]),
+      limitMB: toMB(diskMatch[4], diskMatch[5]),
+      raw: `${diskMatch[2]}${diskMatch[3]}/${diskMatch[4]}${diskMatch[5]}`,
+    };
+  }
+
+  const ramMatch = output.match(/RAM memory:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
+  if (ramMatch) {
+    res.memory = {
+      usePct: Math.round(parseFloat(ramMatch[1])),
+      usedMB: toMB(ramMatch[2], ramMatch[3]),
+      limitMB: toMB(ramMatch[4], ramMatch[5]),
+      raw: `${ramMatch[2]}${ramMatch[3]}/${ramMatch[4]}${ramMatch[5]}`,
+    };
+  }
+
+  const procMatch = output.match(/Processes:\s*\[.*?\]\s*([\d.]+)%\s*\((\d+)\/(\d+)\)/i);
+  if (procMatch) {
+    res.processes = {
+      usePct: parseFloat(procMatch[1]),
+      used: parseInt(procMatch[2], 10),
+      limit: parseInt(procMatch[3], 10),
+    };
+  }
+
+  const cpuMatch = output.match(/CPU:\s*\[.*?\]\s*([\d.]+)%/i);
+  if (cpuMatch) {
+    res.cpu = {
+      usePct: parseFloat(cpuMatch[1]),
+    };
+  }
+
+  return Object.keys(res).length > 0 ? res : null;
+}
+
+let cachedServ00Limits = null;
+let lastServ00LimitsFetch = 0;
+const SERV00_LIMITS_TTL_MS = 30000; // 30 秒缓存，防止频繁执行 devil 命令
+
+/**
+ * 读取 Serv00 真实配额数据（RAM 512MB / 磁盘 3.0GB / CPU / 进程数）
+ */
+function getServ00Limits({
+  forceRefresh = false,
+  execFn = null,
+} = {}) {
+  const now = Date.now();
+  if (!forceRefresh && cachedServ00Limits && now - lastServ00LimitsFetch < SERV00_LIMITS_TTL_MS) {
+    return cachedServ00Limits;
+  }
+
+  try {
+    let output = '';
+    if (typeof execFn === 'function') {
+      output = execFn();
+    } else {
+      const { execSync } = require('node:child_process');
+      const devilBin = ['/bin/devil', '/usr/local/devil/bin/devil', '/usr/local/bin/devil', 'devil'].find((b) => {
+        try {
+          return b === 'devil' || fs.existsSync(b);
+        } catch {
+          return false;
+        }
+      }) || 'devil';
+      output = execSync(`${devilBin} info limits`, {
+        encoding: 'utf8',
+        timeout: 4000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    }
+
+    const parsed = parseDevilLimits(output);
+    if (parsed) {
+      cachedServ00Limits = parsed;
+      lastServ00LimitsFetch = now;
+      return parsed;
+    }
+  } catch {
+    // devil 命令不可用或超时
+  }
+
+  return cachedServ00Limits;
 }
 
 /**
@@ -182,4 +294,6 @@ module.exports = {
   isServ00,
   getCgroupMemoryStats,
   getRuntimeProfile,
+  parseDevilLimits,
+  getServ00Limits,
 };

@@ -1524,14 +1524,25 @@ function renderDashboard() {
               </div>
               <div class="gauge-item">
                 <div class="gauge-head">
-                  <span class="kv-label">磁盘水位</span>
+                  <span class="kv-label" id="gauge-disk-label">磁盘水位</span>
                   <span class="tabular" id="gauge-disk-val">—</span>
                 </div>
                 <div class="gauge-track"><div class="gauge-fill ok" id="gauge-disk-bar" style="width:0%;"></div></div>
               </div>
+              <div class="gauge-item">
+                <div class="gauge-head">
+                  <span class="kv-label" id="gauge-cpu-label">CPU 占用</span>
+                  <span class="tabular" id="gauge-cpu-val">—</span>
+                </div>
+                <div class="gauge-track"><div class="gauge-fill ok" id="gauge-cpu-bar" style="width:0%;"></div></div>
+              </div>
             </div>
 
             <div class="kv-list">
+              <div class="kv-row" id="sys-processes-row" style="display:none;">
+                <span class="kv-label">进程配额</span>
+                <span class="kv-val tabular" id="sys-processes">—</span>
+              </div>
               <div class="kv-row">
                 <span class="kv-label">运行环境</span>
                 <span class="kv-val tabular" id="sys-runtime-env">—</span>
@@ -2658,10 +2669,15 @@ function renderDashboard() {
           chip.classList.toggle('active', chip.dataset.ffStep === ffSourceType);
         });
 
-        // Resource Water-Level Gauges (Memory & Disk)
+        // Resource Water-Level Gauges (Memory, Disk & CPU)
         const memInfo = d.memory || {};
         const memPct = Math.max(0, Math.min(100, Number(memInfo.sysUsePct || 0)));
-        const memSourceLabel = String(memInfo.source || '').startsWith('cgroup') ? '容器配额' : '宿主机';
+        let memSourceLabel = '宿主机';
+        if (memInfo.source === 'serv00') {
+          memSourceLabel = 'Serv00 配额 512MB';
+        } else if (String(memInfo.source || '').startsWith('cgroup')) {
+          memSourceLabel = '容器配额';
+        }
         const memLabelEl = document.getElementById('gauge-mem-label');
         const memValEl = document.getElementById('gauge-mem-val');
         const memBarEl = document.getElementById('gauge-mem-bar');
@@ -2680,20 +2696,59 @@ function renderDashboard() {
           memBarEl.className = 'gauge-fill ' + (isMemErr ? 'err' : isMemWarn ? 'warn' : 'ok');
         }
 
-        const diskPct = d.diskPct;
+        const diskInfo = d.disk || {};
+        const diskPct = typeof d.diskPct === 'number' ? d.diskPct : diskInfo.usePct;
         const diskAlert = Number(d.diskAlertPct || 85);
+        const diskLabelEl = document.getElementById('gauge-disk-label');
         const diskValEl = document.getElementById('gauge-disk-val');
         const diskBarEl = document.getElementById('gauge-disk-bar');
+        if (diskLabelEl) {
+          diskLabelEl.textContent = diskInfo.source === 'serv00' ? '磁盘水位（Serv00 配额 3.0GB）' : '磁盘水位';
+        }
         if (diskValEl && diskBarEl) {
           if (typeof diskPct === 'number' && Number.isFinite(diskPct)) {
             const clampedDisk = Math.max(0, Math.min(100, diskPct));
-            diskValEl.textContent = clampedDisk + '%（告警阈值 ' + diskAlert + '%）';
+            const quotaExtra = diskInfo.limitMB > 0 ? ' · ' + (diskInfo.usedMB || 0) + ' / ' + diskInfo.limitMB + ' MB' : '';
+            diskValEl.textContent = clampedDisk + '%' + quotaExtra + '（告警阈值 ' + diskAlert + '%）';
             diskBarEl.style.width = clampedDisk + '%';
             diskBarEl.className = 'gauge-fill ' + (clampedDisk >= 90 ? 'err' : clampedDisk >= diskAlert ? 'warn' : 'ok');
           } else {
             diskValEl.textContent = '当前环境暂不可用';
             diskBarEl.style.width = '0%';
             diskBarEl.className = 'gauge-fill ok';
+          }
+        }
+
+        // CPU Gauge
+        const cpuPct = typeof d.cpuPct === 'number' ? Math.max(0, Math.min(100, d.cpuPct)) : (typeof memInfo.cpuPct === 'number' ? memInfo.cpuPct : null);
+        const cpuLabelEl = document.getElementById('gauge-cpu-label');
+        const cpuValEl = document.getElementById('gauge-cpu-val');
+        const cpuBarEl = document.getElementById('gauge-cpu-bar');
+        if (cpuLabelEl) {
+          cpuLabelEl.textContent = memInfo.source === 'serv00' ? 'CPU 占用（Serv00 配额）' : 'CPU 占用';
+        }
+        if (cpuValEl && cpuBarEl) {
+          if (typeof cpuPct === 'number' && Number.isFinite(cpuPct)) {
+            cpuValEl.textContent = cpuPct + '%';
+            cpuBarEl.style.width = Math.max(1, cpuPct) + '%';
+            cpuBarEl.className = 'gauge-fill ' + (cpuPct >= 85 ? 'err' : cpuPct >= 60 ? 'warn' : 'ok');
+          } else {
+            cpuValEl.textContent = '—';
+            cpuBarEl.style.width = '0%';
+            cpuBarEl.className = 'gauge-fill ok';
+          }
+        }
+
+        // Process Quota (Serv00)
+        const procInfo = d.processes || memInfo.processes;
+        const procRow = document.getElementById('sys-processes-row');
+        const procVal = document.getElementById('sys-processes');
+        if (procRow && procVal) {
+          if (procInfo && procInfo.limit > 0) {
+            procRow.style.display = '';
+            procVal.textContent = procInfo.used + ' / ' + procInfo.limit + (procInfo.usePct ? ' (' + procInfo.usePct + '%)' : '');
+          } else {
+            procRow.style.display = 'none';
           }
         }
 
