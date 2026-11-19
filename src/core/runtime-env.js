@@ -93,14 +93,19 @@ function toMB(val, unit) {
   return Math.round(n);
 }
 
+function stripAnsi(str) {
+  return typeof str === 'string' ? str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '') : '';
+}
+
 /**
  * 解析 Serv00 devil info limits 终端输出
  */
 function parseDevilLimits(output) {
   if (!output || typeof output !== 'string') return null;
+  const clean = stripAnsi(output);
   const res = {};
 
-  const diskMatch = output.match(/Disk quota:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
+  const diskMatch = clean.match(/Disk quota:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
   if (diskMatch) {
     res.disk = {
       usePct: parseFloat(diskMatch[1]),
@@ -110,7 +115,7 @@ function parseDevilLimits(output) {
     };
   }
 
-  const ramMatch = output.match(/RAM memory:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
+  const ramMatch = clean.match(/RAM memory:\s*\[.*?\]\s*([\d.]+)%\s*\(([\d.]+)([MKGT]?)\/([\d.]+)([MKGT]?)\)/i);
   if (ramMatch) {
     res.memory = {
       usePct: Math.round(parseFloat(ramMatch[1])),
@@ -120,7 +125,7 @@ function parseDevilLimits(output) {
     };
   }
 
-  const procMatch = output.match(/Processes:\s*\[.*?\]\s*([\d.]+)%\s*\((\d+)\/(\d+)\)/i);
+  const procMatch = clean.match(/Processes:\s*\[.*?\]\s*([\d.]+)%\s*\((\d+)\/(\d+)\)/i);
   if (procMatch) {
     res.processes = {
       usePct: parseFloat(procMatch[1]),
@@ -129,7 +134,7 @@ function parseDevilLimits(output) {
     };
   }
 
-  const cpuMatch = output.match(/CPU:\s*\[.*?\]\s*([\d.]+)%/i);
+  const cpuMatch = clean.match(/CPU:\s*\[.*?\]\s*([\d.]+)%/i);
   if (cpuMatch) {
     res.cpu = {
       usePct: parseFloat(cpuMatch[1]),
