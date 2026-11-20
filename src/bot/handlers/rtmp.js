@@ -87,19 +87,40 @@ function register(bot, { safeEditMessageText, buildTaskDetailKeyboard }) {
 
   bot.callbackQuery(/^delurl:(\d+):(\d+)/, async (ctx) => {
     const [, taskId, targetId] = ctx.match;
+    let answered = false;
     try {
-      db.deleteTargetById(taskId, targetId);
-      await ctx.answerCallbackQuery('已删除');
+      const delRes = db.deleteTargetById(taskId, targetId);
       const rawTask = db.getTaskById(taskId);
-      if (!rawTask) { await safeEditMessageText(ctx, '任务已不存在'); return; }
-      await scheduler.refreshTask?.(rawTask);
-      const hydratedTask = scheduler.getTrafficStats?.().find((t) => String(t.id) === String(taskId)) || rawTask;
+      if (!rawTask) {
+        await ctx.answerCallbackQuery('任务已不存在');
+        answered = true;
+        await safeEditMessageText(ctx, '任务已不存在');
+        return;
+      }
+      if ((delRes?.remaining ?? (rawTask.targets?.length || 0)) === 0) {
+        if (rawTask.status === 'ENABLED') {
+          db.updateTaskStatus(taskId, 'DISABLED');
+        }
+        await scheduler.stopManager?.(rawTask);
+        await ctx.answerCallbackQuery('已删除最后一条地址，任务已自动暂停');
+        answered = true;
+      } else {
+        await ctx.answerCallbackQuery('已删除');
+        answered = true;
+        await scheduler.refreshTask?.(rawTask);
+      }
+      const latestRaw = db.getTaskById(taskId) || rawTask;
+      const hydratedTask = scheduler.getTrafficStats?.().find((t) => String(t.id) === String(taskId)) || latestRaw;
       await safeEditMessageText(ctx,
         views.renderTaskDetail(hydratedTask, scheduler.isTaskRunning(hydratedTask)),
         { parse_mode: 'HTML', reply_markup: buildTaskDetailKeyboard(hydratedTask) }
       );
     } catch (err) {
-      await ctx.answerCallbackQuery({ text: `删除失败：${err.message}`, show_alert: true });
+      if (!answered) {
+        await ctx.answerCallbackQuery({ text: `删除失败：${err.message}`, show_alert: true }).catch(() => {});
+      } else {
+        await ctx.reply(`❌ 删除后刷新失败：${err.message}`).catch(() => {});
+      }
     }
   });
 

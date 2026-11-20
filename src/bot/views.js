@@ -60,9 +60,38 @@ function formatUptime(seconds) {
   return `${minutes}分钟`;
 }
 
-function renderRoomList(tasks = []) {
+function sortTasksByActivity(tasks = []) {
+  const rank = (t) => {
+    if (t.status !== 'ENABLED') return 2;
+    return t.traffic?.running ? 0 : 1;
+  };
+  return [...tasks].sort((a, b) => rank(a) - rank(b));
+}
+
+function filterTasksByState(tasks = [], filter = 'all') {
+  const list = Array.isArray(tasks) ? tasks : [];
+  if (filter === 'live') {
+    return list.filter((t) => t.status === 'ENABLED' && Boolean(t.traffic?.running));
+  }
+  if (filter === 'idle') {
+    return list.filter((t) => t.status === 'ENABLED' && !t.traffic?.running);
+  }
+  if (filter === 'paused') {
+    return list.filter((t) => t.status !== 'ENABLED');
+  }
+  return list;
+}
+
+function renderRoomList(tasks = [], filter = 'all') {
   if (tasks.length === 0) {
-    return '<b>📭 房间管理</b>\n\n当前还没有已配置房间\n点击「➕ 添加房间」开始创建';
+    return [
+      '<b>🏠 房间管理中心</b>',
+      '',
+      '<blockquote>📭 <b>还没有配置任何转播房间</b>',
+      '支持 <b>B站</b> · <b>斗鱼</b> · <b>抖音</b> 直播间链接（含 <code>b23.tv</code> / <code>v.douyin.com</code> 短链），直接发送给机器人即可自动识别建房。</blockquote>',
+      '',
+      '<i>💡 点击下方「➕ 立即添加房间」，或直接发送「直播间链接 + rtmp地址」一行极速建房</i>',
+    ].join('\n');
   }
 
   const live = [];
@@ -80,33 +109,142 @@ function renderRoomList(tasks = []) {
     idle.push(task);
   }
 
+  const filterLabels = {
+    all: '',
+    live: ' · 筛选: 🟢 推流中',
+    idle: ' · 筛选: ⚪ 待机',
+    paused: ' · 筛选: 🛑 已暂停',
+  };
+  const activeFilter = filterLabels[filter] !== undefined ? filter : 'all';
+  const totalKbps = live.reduce((sum, t) => sum + Math.round(t.traffic?.bitrateKbps || 0), 0);
+  const rateSummary = totalKbps > 0 ? ` · ⚡ <code>${totalKbps} kbps</code>` : '';
+
   const lines = [
-    `<b>🏠 房间管理</b> · 共 ${tasks.length} 个房间`,
+    `<b>🏠 房间管理中心</b> · 共 <b>${tasks.length}</b> 房${filterLabels[activeFilter]}`,
+    `<code>🟢 ${live.length} 推流中</code> · <code>⚪ ${idle.length} 待机</code> · <code>🛑 ${paused.length} 暂停</code>${rateSummary}`,
     '',
   ];
 
-  const renderGroup = (icon, title, group, detail) => {
+  const renderGroupCard = (icon, title, group, detail) => {
     if (group.length === 0) return;
-    lines.push(`${icon} <b>${title}</b>（${group.length}）`);
+    const cardLines = [`${icon} <b>${title} (${group.length})</b>`];
     for (const task of group) {
       const host = task.traffic?.roomInfo?.hostName
-        ? ` (${escapeHtml(task.traffic.roomInfo.hostName)})`
+        ? ` · ${escapeHtml(task.traffic.roomInfo.hostName)}`
         : '';
       const cookieTag = task.cookie ? ' 🍪' : '';
-      lines.push(`▪️ ${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}${host}${cookieTag}${detail(task)}`);
+      cardLines.push(`▸ <b>${escapeHtml(platformLabel(task.platform))}</b> <code>#${escapeHtml(task.room_id)}</code>${host}${cookieTag}${detail(task)}`);
     }
-    lines.push('');
+    lines.push(`<blockquote>${cardLines.join('\n')}</blockquote>`);
   };
 
-  renderGroup('🟢', '推流中', live, (t) => {
-    const kbps = Math.round(t.traffic?.bitrateKbps || 0);
-    return kbps > 0 ? ` · ${kbps} kbps` : '';
-  });
-  renderGroup('⚪', '待机 / 轮询中', idle, () => ' · 等待开播');
-  renderGroup('🛑', '已暂停', paused, () => '');
+  const visibleCount = filterTasksByState(tasks, activeFilter).length;
+  if (visibleCount === 0) {
+    const emptyReason = activeFilter === 'live'
+      ? '当前暂无正在推流的房间'
+      : activeFilter === 'idle'
+        ? '当前暂无待机监听中的房间'
+        : '当前暂无已暂停的房间';
+    lines.push(`<blockquote>📭 <b>${emptyReason}</b>\n点击上方筛选标签可切换查看全部房间。</blockquote>`);
+  } else {
+    if (activeFilter === 'all' || activeFilter === 'live') {
+      renderGroupCard('🟢', '正在推流', live, (t) => {
+        const kbps = Math.round(t.traffic?.bitrateKbps || 0);
+        const dur = t.traffic?.startedAt
+          ? ` · ${formatUptime((Date.now() - new Date(t.traffic.startedAt).getTime()) / 1000)}`
+          : '';
+        return kbps > 0 ? ` · <code>${kbps} kbps</code>${dur}` : '';
+      });
+    }
+    if (activeFilter === 'all' || activeFilter === 'idle') {
+      renderGroupCard('⚪', '待机监听', idle, () => ' · <i>等待开播</i>');
+    }
+    if (activeFilter === 'all' || activeFilter === 'paused') {
+      renderGroupCard('🛑', '已暂停', paused, () => '');
+    }
+  }
 
-  lines.push('<i>点下方按钮进入单房间全功能控制台</i>');
+  lines.push('');
+  lines.push('<i>👇 点击下方房间按钮进入单房间控制台，或点「🎛️ 实时卡片」打开内联面板</i>');
   return lines.join('\n');
+}
+
+function renderCurveRoomPicker(tasks = []) {
+  if (!tasks || tasks.length === 0) {
+    return [
+      '<b>📈 分房间推流曲线</b>',
+      '',
+      '<blockquote>📭 <b>当前还没有配置任何直播房间</b>',
+      '添加房间并开播推流后，可按单房间查看 <b>30分 / 1小时 / 3小时 / 6小时 / 12小时</b> 高清码率曲线。</blockquote>',
+    ].join('\n');
+  }
+
+  const sorted = sortTasksByActivity(tasks);
+  const liveCount = sorted.filter((t) => t.status === 'ENABLED' && t.traffic?.running).length;
+  const cardLines = [`<b>选择要查看码率曲线的直播间</b>（支持 30分 / 1h / 3h / 6h / 12h 切换）`];
+  for (const task of sorted) {
+    const running = task.status === 'ENABLED' && Boolean(task.traffic?.running);
+    const icon = task.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
+    const host = task.traffic?.roomInfo?.hostName ? ` · ${escapeHtml(task.traffic.roomInfo.hostName)}` : '';
+    const kbps = Math.round(task.traffic?.bitrateKbps || 0);
+    const detail = running && kbps > 0 ? ` · <code>${kbps} kbps</code>` : '';
+    cardLines.push(`${icon} <b>${escapeHtml(platformLabel(task.platform))}</b> <code>#${escapeHtml(task.room_id)}</code>${host}${detail}`);
+  }
+
+  return [
+    `<b>📈 分房间推流曲线</b> · <code>🟢 ${liveCount} 推流中</code> / 共 ${sorted.length} 房`,
+    '',
+    `<blockquote>${cardLines.join('\n')}</blockquote>`,
+    '',
+    '<i>👇 点击下方房间查看深色高清仪表盘曲线（也可发 <code>/curve 房间号</code> 直达）</i>',
+  ].join('\n');
+}
+
+function renderQuickSnapEmpty(tasks = []) {
+  if (tasks.length === 0) {
+    return [
+      '<b>📷 快捷截图</b>',
+      '',
+      '<blockquote>📭 <b>当前还没有配置任何直播房间</b>',
+      '添加房间并在主播开播推流后，点击「📷 快捷截图」即可直接抓取实时画面。</blockquote>',
+    ].join('\n');
+  }
+
+  const enabledCount = tasks.filter((t) => t.status === 'ENABLED').length;
+  return [
+    '<b>📷 快捷截图</b>',
+    '',
+    `<blockquote>⏸️ <b>当前暂无正在推流的房间</b>`,
+    `共配置 <b>${tasks.length}</b> 个房间（其中 <b>${enabledCount}</b> 个正在待机监听）。`,
+    `快捷截图仅针对<b>正在推流中</b>的直播间自动抓帧，主播开播后点击即可一键出图。</blockquote>`,
+    '',
+    '<i>💡 如需指定房间抓帧，可发送 <code>/snap 房间号</code></i>',
+  ].join('\n');
+}
+
+function renderSnapshotCaption(task, { indexLabel = '' } = {}) {
+  const traffic = task.traffic || {};
+  const roomInfo = traffic.roomInfo || {};
+  const host = roomInfo.hostName ? ` · ${escapeHtml(roomInfo.hostName)}` : '';
+  const idxTag = indexLabel ? ` <code>${escapeHtml(indexLabel)}</code>` : '';
+  const kbps = Math.round(traffic.bitrateKbps || 0);
+  const duration = traffic.running && traffic.startedAt
+    ? formatUptime((Date.now() - new Date(traffic.startedAt).getTime()) / 1000)
+    : '实时抓帧';
+  const nowStr = new Date().toLocaleString('zh-CN', { hour12: false });
+
+  const metaLines = [
+    `⚡ 码率：<code>${kbps > 0 ? `${kbps} kbps` : '检测中'}</code>  ｜  ⏱️ 时长：<code>${escapeHtml(duration)}</code>`,
+  ];
+  if (roomInfo.roomName) {
+    metaLines.push(`📝 标题：${escapeHtml(roomInfo.roomName)}`);
+  }
+  metaLines.push(`🕒 时间：<code>${escapeHtml(nowStr)}</code>`);
+
+  return [
+    `📸 <b>${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}</b>${host}${idxTag}`,
+    `<blockquote>${metaLines.join('\n')}</blockquote>`,
+  ].join('\n');
 }
 
 function transcodeModeLabel(mode = 'default') {
@@ -143,44 +281,37 @@ function renderTaskDetail(task, isRunning) {
 
   const lines = [
     `<b>📺 ${escapeHtml(platformLabel(task.platform))} · #${escapeHtml(task.room_id)}</b>`,
-    `${statusLabel(task.status)}  ·  FFmpeg ${running ? '✅ 推流中' : '⚪ 待机'}`,
+    `${statusLabel(task.status)}  ·  FFmpeg ${running ? '🟢 推流中' : '⚪ 待机'}`,
+    '',
   ];
 
-  if (roomInfo.hostName || roomInfo.roomName) {
-    lines.push('');
-    if (roomInfo.hostName) lines.push(`👤 主播：<b>${escapeHtml(roomInfo.hostName)}</b>`);
-    if (roomInfo.roomName) lines.push(`📝 标题：${escapeHtml(roomInfo.roomName)}`);
-  }
-
-  lines.push('');
-  lines.push(`<b>📊 实时遥测 & 房间策略</b>`);
-  lines.push(`  ⚡ 码率：${kbps > 0 ? `${kbps} kbps` : '0 kbps'}  ｜  ⏱️ 时长：${duration}`);
-  lines.push(`  📤 本场：${formatBytes(traffic.sessionBytes || 0)}  ｜  📦 累计：${formatBytes(traffic.totalBytes || 0)}`);
-  lines.push(`  🎬 编码策略：<b>${escapeHtml(modeLabel)}</b>`);
-  lines.push(`  🍪 房间Cookie：${hasRoomCookie ? `✅ 已独立配置 (${String(task.cookie).length} 字符)` : '⚪ 未配置 (默认)'}`);
+  const telemetryLines = [];
+  if (roomInfo.hostName) telemetryLines.push(`👤 主播：<b>${escapeHtml(roomInfo.hostName)}</b>`);
+  if (roomInfo.roomName) telemetryLines.push(`📝 标题：${escapeHtml(roomInfo.roomName)}`);
+  if (telemetryLines.length > 0) telemetryLines.push('');
+  telemetryLines.push(`<b>📊 实时遥测 &amp; 房间策略</b>`);
+  telemetryLines.push(`⚡ 码率：<code>${kbps > 0 ? `${kbps} kbps` : '0 kbps'}</code>  ｜  ⏱️ 时长：<code>${escapeHtml(duration)}</code>`);
+  telemetryLines.push(`📤 本场：<code>${formatBytes(traffic.sessionBytes || 0)}</code>  ｜  📦 累计：<code>${formatBytes(traffic.totalBytes || 0)}</code>`);
+  telemetryLines.push(`🎬 编码策略：<b>${escapeHtml(modeLabel)}</b>`);
+  telemetryLines.push(`🍪 房间Cookie：${hasRoomCookie ? `✅ 已独立配置 (${String(task.cookie).length} 字符)` : '⚪ 未配置 (默认)'}`);
   if ((traffic.errorCount || 0) > 0) {
-    lines.push(`  ⚠️ 累计错误：${traffic.errorCount} 次`);
+    telemetryLines.push(`⚠️ 累计错误：<b>${traffic.errorCount} 次</b>`);
   }
+  lines.push(`<blockquote>${telemetryLines.join('\n')}</blockquote>`);
 
-  lines.push('');
   if (targetUrls.length > 0) {
-    lines.push(`<b>📤 推流地址 (${targetUrls.length})</b>`);
+    const urlCardLines = [`<b>📤 推流地址 (${targetUrls.length})</b>`];
     targetUrls.forEach((url, idx) => {
-      lines.push('');
-      if (idx === 0) {
-        lines.push(`<b>${idx + 1}.</b> ⭐主推流`);
-      } else {
-        lines.push(`<b>${idx + 1}.</b> 备用线路 #${idx}`);
-      }
-      lines.push(`<code>${escapeHtml(url)}</code>`);
+      urlCardLines.push(idx === 0 ? `<b>${idx + 1}.</b> ⭐主推流` : `<b>${idx + 1}.</b> 备用线路 #${idx}`);
+      urlCardLines.push(`<code>${escapeHtml(url)}</code>`);
     });
+    lines.push(`<blockquote>${urlCardLines.join('\n')}</blockquote>`);
   } else {
-    lines.push(`<b>📤 推流地址</b>：未配置`);
+    lines.push(`<blockquote><b>📤 推流地址</b>：未配置</blockquote>`);
   }
 
   if (task.last_error && task.last_error !== 'STREAM_ENDED') {
-    lines.push('');
-    lines.push(`⚠️ ${escapeHtml(task.last_error)}`);
+    lines.push(`<blockquote>⚠️ <b>最近异常</b>：${escapeHtml(task.last_error)}</blockquote>`);
   }
 
   return lines.join('\n');
@@ -212,50 +343,53 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
   }
 
   lines.push('');
-  lines.push(`<b>🖥️ 服务器与配额状态</b>`);
+  const sysCard = [`<b>🖥️ 服务器与配额状态</b>`];
 
   const cpuExtra = system.cpuLabel ? ` (${escapeHtml(system.cpuLabel)})` : '';
-  lines.push(`  CPU：[${system.cpuBar || '░░░░░░░░░░'}] ${system.cpuPercent ?? 0}%${cpuExtra}`);
+  sysCard.push(`CPU：[${system.cpuBar || '░░░░░░░░░░'}] ${system.cpuPercent ?? 0}%${cpuExtra}`);
 
   const ramExtra = system.memLabel ? ` (${system.memPct ?? 0}% · ${escapeHtml(system.memLabel)})` : (system.memPct != null ? ` (${system.memPct}%)` : '');
-  lines.push(`  RAM：${escapeHtml(system.memUsed || '?')} / ${escapeHtml(system.memTotal || '?')}${ramExtra}`);
+  sysCard.push(`RAM：${escapeHtml(system.memUsed || '?')} / ${escapeHtml(system.memTotal || '?')}${ramExtra}`);
 
   if (system.disk) {
     const diskLabel = system.disk.label ? ` · ${escapeHtml(system.disk.label)}` : '';
-    lines.push(`  DISK：${escapeHtml(system.disk.used)} / ${escapeHtml(system.disk.total)} (${system.disk.pct}%${diskLabel})`);
+    sysCard.push(`DISK：${escapeHtml(system.disk.used)} / ${escapeHtml(system.disk.total)} (${system.disk.pct}%${diskLabel})`);
   }
 
   if (system.processes) {
-    lines.push(`  PROC：${system.processes.used} / ${system.processes.limit} 进程 (${system.processes.pct}% · 限额 ${system.processes.limit})`);
+    sysCard.push(`PROC：${system.processes.used} / ${system.processes.limit} 进程 (${system.processes.pct}% · 限额 ${system.processes.limit})`);
   }
 
   const heapTag = system.heapUsed ? ` (V8堆 ${escapeHtml(system.heapUsed)})` : '';
-  lines.push(`  SVC：服务占用 ${escapeHtml(system.serviceMem || '?')}${heapTag}`);
+  sysCard.push(`SVC：服务占用 ${escapeHtml(system.serviceMem || '?')}${heapTag}`);
 
   if (system.dbSize) {
-    lines.push(`  DB：${escapeHtml(system.dbSize)} (SQLite)`);
+    sysCard.push(`DB：${escapeHtml(system.dbSize)} (SQLite)`);
   }
   if (system.ffmpegVersion) {
     const customBadge = system.ffmpegCustomBinary ? '✅ 自定义/内置' : 'ℹ️ 系统PATH';
-    lines.push(`  FFmpeg：<code>${escapeHtml(system.ffmpegVersion)}</code> · ${customBadge} (${escapeHtml(system.ffmpegSource || '系统内置')})`);
+    sysCard.push(`FFmpeg：<code>${escapeHtml(system.ffmpegVersion)}</code> · ${customBadge} (${escapeHtml(system.ffmpegSource || '系统内置')})`);
     if (system.ffmpegPath) {
-      lines.push(`  路径：<code>${escapeHtml(system.ffmpegPath)}</code>`);
+      sysCard.push(`路径：<code>${escapeHtml(system.ffmpegPath)}</code>`);
     }
   }
+  lines.push(`<blockquote>${sysCard.join('\n')}</blockquote>`);
 
-  lines.push('');
-  lines.push(`<b>📈 任务统计</b>`);
-  lines.push(`  🏠 总计: ${stats.totalTasks ?? 0}  ｜  ✅ 运行: ${stats.enabledTasks ?? 0}  ｜  🛑 暂停: ${stats.disabledTasks ?? 0}`);
-  lines.push(`  ⚙️ 活跃推流: ${stats.activeStreams ?? 0} 路  ｜  🔍 房间监听: ${stats.totalMonitoring ?? 0} 个`);
-  lines.push(`  📤 推流线路: ${stats.totalTargets ?? 0} 条`);
-  lines.push(`  🎬 全局视频: ${system.transcodeVideo ? 'libx264 转码' : '原画直推 (copy)'}  ｜  🔊 音频修复: ${system.transcodeAudio ? 'AAC 48kHz' : '直推 (copy)'}`);
+  const statsCard = [
+    `<b>📈 任务统计</b>`,
+    `🏠 总计: <b>${stats.totalTasks ?? 0}</b>  ｜  ✅ 运行: <b>${stats.enabledTasks ?? 0}</b>  ｜  🛑 暂停: <b>${stats.disabledTasks ?? 0}</b>`,
+    `⚙️ 活跃推流: <b>${stats.activeStreams ?? 0} 路</b>  ｜  🔍 房间监听: <b>${stats.totalMonitoring ?? 0} 个</b>`,
+    `📤 推流线路: <b>${stats.totalTargets ?? 0} 条</b>`,
+    `🎬 全局视频: ${system.transcodeVideo ? 'libx264 转码' : '原画直推 (copy)'}  ｜  🔊 音频修复: ${system.transcodeAudio ? 'AAC 48kHz' : '直推 (copy)'}`,
+  ];
+  lines.push(`<blockquote>${statsCard.join('\n')}</blockquote>`);
 
   if (recentErrors.length > 0) {
-    lines.push('');
-    lines.push(`<b>⚠️ 最近警告</b>`);
+    const errCard = [`<b>⚠️ 最近警告</b>`];
     recentErrors.slice(0, 5).forEach((err, idx) => {
-      lines.push(`  ${idx + 1}. ${escapeHtml(err)}`);
+      errCard.push(`${idx + 1}. ${escapeHtml(err)}`);
     });
+    lines.push(`<blockquote>${errCard.join('\n')}</blockquote>`);
   } else {
     lines.push('');
     lines.push(`🟢 <b>状态诊断</b>：全链路正常运行，无错误告警`);
@@ -269,42 +403,51 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
  */
 function renderStatusList(entries = []) {
   if (entries.length === 0) {
-    return '<b>📊 推流状态</b>\n\n当前还没有配置任何直播房间。';
+    return [
+      '<b>📊 推流状态总览</b>',
+      '',
+      '<blockquote>📭 <b>当前还没有配置任何直播房间</b>',
+      '添加直播间并开启监控后，这里将实时聚合各路推流码率、开播时长与流量统计。</blockquote>',
+      '',
+      '<i>💡 点击下方按钮立即添加房间</i>',
+    ].join('\n');
   }
-  const liveCount = entries.filter((e) => e.traffic?.running).length;
-  const enabledCount = entries.filter((e) => e.status === 'ENABLED').length;
-  const totalKbps = entries.reduce((sum, e) => sum + Math.round(e.traffic?.bitrateKbps || 0), 0);
+  const sorted = sortTasksByActivity(entries);
+  const liveCount = sorted.filter((e) => e.traffic?.running).length;
+  const enabledCount = sorted.filter((e) => e.status === 'ENABLED').length;
+  const totalKbps = sorted.reduce((sum, e) => sum + Math.round(e.traffic?.bitrateKbps || 0), 0);
 
   const lines = [
     '<b>📊 推流状态总览</b>',
-    `🟢 <b>${liveCount}</b> 路推流中 · ⚪ <b>${Math.max(0, enabledCount - liveCount)}</b> 待机 · 🛑 <b>${entries.length - enabledCount}</b> 暂停`,
-    `⚡ 总实时码率：<b>${totalKbps} kbps</b>`,
+    `<code>🟢 ${liveCount} 推流中</code> · <code>⚪ ${Math.max(0, enabledCount - liveCount)} 待机</code> · <code>🛑 ${sorted.length - enabledCount} 暂停</code> · ⚡ <code>${totalKbps} kbps</code>`,
     '',
   ];
 
-  entries.forEach((entry, idx) => {
+  const cardLines = [];
+  sorted.forEach((entry, idx) => {
     const traffic = entry.traffic || {};
     const roomInfo = traffic.roomInfo || {};
     const running = Boolean(traffic.running);
     const kbps = Math.round(traffic.bitrateKbps || 0);
     const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
     const host = roomInfo.hostName ? ` · ${escapeHtml(roomInfo.hostName)}` : '';
-    const title = roomInfo.roomName ? `\n     <i>${escapeHtml(roomInfo.roomName)}</i>` : '';
+    const title = roomInfo.roomName ? `\n   <i>${escapeHtml(roomInfo.roomName)}</i>` : '';
     const runtime = running && traffic.startedAt
       ? formatUptime((Date.now() - new Date(traffic.startedAt).getTime()) / 1000)
       : null;
     const stateDesc = entry.status !== 'ENABLED'
       ? '已暂停'
       : running
-        ? `${kbps} kbps · ${runtime || '推流中'} · ${formatBytes(traffic.sessionBytes || 0)}`
-        : '等待开播';
+        ? `<code>${kbps} kbps</code> · ${runtime || '推流中'} · ${formatBytes(traffic.sessionBytes || 0)}`
+        : '<i>等待开播</i>';
 
-    lines.push(`${idx + 1}. ${icon} <b>${escapeHtml(platformLabel(entry.platform))} #${escapeHtml(entry.room_id)}</b>${host}`);
-    lines.push(`     ${stateDesc}${title}`);
+    cardLines.push(`${idx + 1}. ${icon} <b>${escapeHtml(platformLabel(entry.platform))}</b> <code>#${escapeHtml(entry.room_id)}</code>${host}`);
+    cardLines.push(`   ${stateDesc}${title}`);
   });
+  lines.push(`<blockquote>${cardLines.join('\n')}</blockquote>`);
 
   lines.push('');
-  lines.push('<i>👇 点击下方房间查看实时封面与详情：</i>');
+  lines.push('<i>👇 点击下方房间查看实时封面与详情</i>');
   return lines.join('\n');
 }
 
@@ -511,36 +654,78 @@ function renderDiagnoseReport(task, diag) {
   return lines.join('\n');
 }
 
-function renderWaveChartCaption({ task, windowInfo, sessions = [], unicodeWave = '' }) {
+function renderWaveChartCaption({
+  task,
+  windowInfo,
+  sessions = [],
+  unicodeWave = '',
+  avgKbps = null,
+  peakKbps = null,
+  currentKbps = null,
+}) {
+  const host = task?.traffic?.roomInfo?.hostName
+    ? ` · ${escapeHtml(task.traffic.roomInfo.hostName)}`
+    : '';
   const titleLabel = task
-    ? `${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}`
+    ? `${escapeHtml(platformLabel(task.platform))} #${escapeHtml(task.room_id)}${host}`
     : '全局汇总（全部房间）';
 
+  const isMinute = Boolean(windowInfo?.isMinuteScale);
+  const headerTitle = isMinute
+    ? `<b>📈 推流码率曲线</b> · <b>${titleLabel}</b>`
+    : `<b>📈 24小时推流码率波浪曲线</b> · <b>${titleLabel}</b>`;
+
+  const metaLines = [
+    `🕒 窗口：<code>${escapeHtml(windowInfo?.label || '')}</code>`,
+  ];
+  const liveK = currentKbps != null ? Math.round(currentKbps) : Math.round(task?.traffic?.bitrateKbps || 0);
+  const avgK = avgKbps != null
+    ? Math.round(avgKbps)
+    : (sessions.length > 0
+      ? Math.round(sessions.reduce((s, it) => s + it.avgKbps, 0) / sessions.length)
+      : 0);
+  const peakK = peakKbps != null
+    ? Math.round(peakKbps)
+    : sessions.reduce((m, it) => Math.max(m, it.peakKbps || 0), 0);
+
+  if (liveK > 0 || avgK > 0 || peakK > 0) {
+    const nowText = liveK > 0 ? `${liveK}k` : 'OFF';
+    metaLines.push(`⚡ 实时 <code>${nowText}</code> · 均值 <code>${avgK}k</code> · 峰值 <code>${peakK}k</code>`);
+  }
+  if (unicodeWave) {
+    metaLines.push(`🌊 走势：<code>${escapeHtml(unicodeWave)}</code>`);
+  }
+
   const lines = [
-    `<b>📈 24小时推流码率波浪曲线</b> · <b>${titleLabel}</b>`,
-    `🕒 周期：<code>${escapeHtml(windowInfo.label)}</code>`,
-    `🌊 24h 波浪缩略：<code>${escapeHtml(unicodeWave)}</code>`,
-    '',
+    headerTitle,
+    `<blockquote>${metaLines.join('\n')}</blockquote>`,
   ];
 
   if (sessions.length === 0) {
-    lines.push(`📭 <b>本 24 小时周期内暂无开播推流记录</b>`);
-    lines.push(`<i>（推流启动后系统每分钟自动采样，支持跨零点与一天多场次分段统计）</i>`);
+    lines.push(
+      isMinute
+        ? `📭 <b>当前时段内暂无推流采样记录</b>（可切换更大时间窗口查看）`
+        : `📭 <b>本 24 小时周期内暂无开播推流记录</b>`
+    );
+    lines.push(`<i>推流启动后系统每 30 秒自动采样一次，自动追踪码率波动与开播场次</i>`);
   } else {
     const totalMin = sessions.reduce((s, item) => s + item.durationMin, 0);
     const maxPeak = sessions.reduce((m, item) => Math.max(m, item.peakKbps), 0);
-    lines.push(`🎬 <b>本周期共开播 ${sessions.length} 场</b>（累计 ${totalMin} 分钟 · 峰值 ${maxPeak} kbps）：`);
-    sessions.slice(0, 8).forEach((sess) => {
+    const sessionLines = [
+      `🎬 <b>本时段共开播 ${sessions.length} 场</b>（累计 ${totalMin} 分钟 · 峰值 ${maxPeak} kbps）`,
+    ];
+    sessions.slice(0, 6).forEach((sess) => {
       const h = Math.floor(sess.durationMin / 60);
       const m = sess.durationMin % 60;
       const durStr = h > 0 ? `${h}h${m}m` : `${m}m`;
-      lines.push(
+      sessionLines.push(
         `  <b>#${sess.index}场</b> <code>${sess.startTimeStr}-${sess.endTimeStr}</code> (${durStr}) · 均 <b>${sess.avgKbps}k</b> / 峰 <b>${sess.peakKbps}k</b> · ~${formatBytes(sess.estimatedBytes)}`
       );
     });
-    if (sessions.length > 8) {
-      lines.push(`  <i>…其余 ${sessions.length - 8} 场已显示在上方波浪图中</i>`);
+    if (sessions.length > 6) {
+      sessionLines.push(`  <i>…其余 ${sessions.length - 6} 场已显示在上方曲线图中</i>`);
     }
+    lines.push(`<blockquote>${sessionLines.join('\n')}</blockquote>`);
   }
 
   return lines.join('\n');
@@ -552,7 +737,12 @@ module.exports = {
   nextTranscodeMode,
   escapeHtml,
   humanizeError,
+  sortTasksByActivity,
+  filterTasksByState,
   renderRoomList,
+  renderCurveRoomPicker,
+  renderQuickSnapEmpty,
+  renderSnapshotCaption,
   renderTaskDetail,
   renderDeleteConfirm,
   renderDashboard,

@@ -1564,12 +1564,13 @@ function renderDashboard() {
                 <span class="kv-val tabular" id="sys-node-ver">—</span>
               </div>
               <div class="kv-row">
-                <span class="kv-label">Git 代码版本</span>
-                <span class="kv-val" style="display:flex;align-items:center;gap:6px;">
+                <span class="kv-label">代码版本</span>
+                <span class="kv-val" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
                   <span class="tabular" id="sys-git-ver">—</span>
-                  <button id="btn-check-update" class="btn btn-outline" style="padding:2px 8px;font-size:11px;cursor:pointer;">检查更新</button>
+                  <button type="button" id="btn-check-update" class="row-action-btn" style="min-height:26px;padding:2px 10px;font-size:11.5px;">检查更新</button>
                 </span>
               </div>
+              <div id="update-feedback-box" style="display:none;padding:10px 12px;margin:6px 0;border-radius:var(--radius-sm);border:1px solid var(--border-hairline);background:var(--bg-canvas);font-size:12px;line-height:1.6;"></div>
               <div class="kv-row">
                 <span class="kv-label">FFmpeg 引擎版本</span>
                 <span class="kv-val tabular" id="sys-ffmpeg-ver">—</span>
@@ -2774,37 +2775,70 @@ function renderDashboard() {
         if (gitVerEl) gitVerEl.textContent = d.gitVersion || '—';
 
         const btnCheckUpdate = document.getElementById('btn-check-update');
+        const updateBox = document.getElementById('update-feedback-box');
         if (btnCheckUpdate && !btnCheckUpdate._bound) {
           btnCheckUpdate._bound = true;
           btnCheckUpdate.addEventListener('click', async () => {
             btnCheckUpdate.textContent = '检查中...';
             btnCheckUpdate.disabled = true;
+            if (updateBox) {
+              updateBox.style.display = 'block';
+              updateBox.innerHTML = '<span style="color:var(--text-secondary);">正在查询 GitHub 远程版本...</span>';
+            }
             try {
-              const res = await fetch('/api/system/check-update?token=' + encodeURIComponent(authToken()));
+              const res = await fetch('/api/system/check-update', { headers: authHeaders() });
               const data = await res.json();
-              if (!data.ok) throw new Error(data.error || '检查失败');
+              if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+              const modeLabel = '免 Git 压缩包模式';
               if (!data.hasUpdate) {
-                alert('当前已是最新版本 (' + data.localSha + ')');
+                if (updateBox) {
+                  updateBox.innerHTML = '<span style="color:var(--ok-text);">✓ 当前已是最新版本 (' + esc(data.localSha) + ' · ' + modeLabel + ')</span>';
+                }
               } else {
-                const logs = (data.commitLogs || []).map(function(l) { return '• ' + l; });
-                const promptLines = [
-                  '发现新版本: ' + data.remoteSha + ' (落后 ' + data.commitsBehind + ' 个提交)',
-                  '',
-                  '更新内容:'
-                ].concat(logs).concat(['', '是否立即拉取更新并秒级重启？']);
-                const confirmed = confirm(promptLines.join('\\n'));
-                if (confirmed) {
-                  btnCheckUpdate.textContent = '更新重启中...';
-                  const upRes = await fetch('/api/system/apply-update?token=' + encodeURIComponent(authToken()), { method: 'POST' });
-                  const upData = await upRes.json();
-                  if (!upData.ok) throw new Error(upData.error || '更新失败');
-                  alert('代码已更新，服务正在秒级拉起，页面将在 3 秒后刷新');
-                  setTimeout(() => location.reload(), 3500);
-                  return;
+                const logsHtml = (data.commitLogs || []).map(function(l) {
+                  return '<div class="tabular" style="color:var(--text-secondary);">• ' + esc(l) + '</div>';
+                }).join('');
+                if (updateBox) {
+                  updateBox.innerHTML =
+                    '<div style="color:var(--text-primary);font-weight:600;margin-bottom:4px;">发现新版本 ' + esc(data.remoteSha) + '（落后 ' + Number(data.commitsBehind || 1) + ' 个提交 · ' + modeLabel + '）</div>' +
+                    logsHtml +
+                    '<div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">' +
+                      '<button type="button" class="primary-btn" id="btn-confirm-update" style="min-height:30px;padding:4px 12px;font-size:12px;">确认更新并重启</button>' +
+                      '<button type="button" class="row-action-btn" id="btn-cancel-update" style="min-height:30px;padding:4px 10px;font-size:12px;">取消</button>' +
+                    '</div>';
+                  const cancelBtn = document.getElementById('btn-cancel-update');
+                  const confirmBtn = document.getElementById('btn-confirm-update');
+                  if (cancelBtn) {
+                    cancelBtn.addEventListener('click', () => {
+                      updateBox.style.display = 'none';
+                    });
+                  }
+                  if (confirmBtn) {
+                    confirmBtn.addEventListener('click', async () => {
+                      confirmBtn.disabled = true;
+                      confirmBtn.textContent = '正在更新重启...';
+                      btnCheckUpdate.disabled = true;
+                      try {
+                        const upRes = await fetch('/api/system/apply-update', {
+                          method: 'POST',
+                          headers: authHeaders(),
+                        });
+                        const upData = await upRes.json().catch(() => ({}));
+                        if (!upRes.ok || !upData.ok) throw new Error(upData.error || ('HTTP ' + upRes.status));
+                        updateBox.innerHTML = '<span style="color:var(--ok-text);">✓ 代码已更新 (' + esc(upData.result?.toSha || data.remoteSha) + ')，服务正在自动重启，3 秒后刷新页面...</span>';
+                        setTimeout(() => location.reload(), 3500);
+                      } catch (upErr) {
+                        updateBox.innerHTML = '<span style="color:var(--err-text);">更新失败：' + esc(upErr.message || '网络错误') + '</span>';
+                        btnCheckUpdate.disabled = false;
+                      }
+                    });
+                  }
                 }
               }
             } catch (err) {
-              alert('检查更新失败: ' + err.message);
+              if (updateBox) {
+                updateBox.innerHTML = '<span style="color:var(--err-text);">检查更新失败：' + esc(err.message || '网络错误') + '</span>';
+              }
             } finally {
               btnCheckUpdate.textContent = '检查更新';
               btnCheckUpdate.disabled = false;

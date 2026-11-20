@@ -15,47 +15,49 @@
 const zlib = require('zlib');
 
 // ─── Widget HTML ────────────────────────────────────────────────────────────
-// 遵循 Bot API 10.4 规范：
-// - 使用原生 --tg-theme-* CSS 变量适配明暗主题
-// - 通过 TelegramWidget.chatData 读取状态，监听 chatDataChanged / themeChanged
-// - 通过 TelegramWidget.request() 发操作并展示请求状态与返回值
-// - 控制紧凑布局使总高度在 50~560px 内，避免被气泡裁剪
+// 遵循 Bot API 10.4 规范与现代仪表盘视觉约束：
+// - 单层柔和 1px 描边卡片（无左侧粗竖条），原生 --tg-theme-* 主题自适应
+// - tabular-nums 严格数字对齐，语义化状态文字代替堆砌胶囊
+// - 内置 全部 / 推流中 / 待机 筛选标签，支持单房 曲线(cur) / 截图(snap) / 启停(tog)
 const WIDGET_HTML = `<!DOCTYPE html><html><head><meta charset=utf-8><style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font:12px/1.35 -apple-system,sans-serif;padding:8px 10px;color:var(--tg-theme-text-color,#e6edf3);background:transparent}
-.hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.tt{font-size:11px;font-weight:700;color:var(--tg-theme-hint-color,#8b949e);letter-spacing:.4px}
-.res{display:flex;gap:5px;margin-bottom:6px}
-.ri{flex:1;background:var(--tg-theme-secondary-bg-color,rgba(128,128,128,.12));border-radius:6px;padding:5px 7px}
-.rl{font-size:10px;color:var(--tg-theme-hint-color,#8b949e)}
-.rv{font-size:12px;font-weight:700;margin-top:1px}
-.bar{height:3px;border-radius:2px;background:rgba(128,128,128,.22);margin-top:3px;overflow:hidden}
-.bf{height:100%;border-radius:2px;background:#2ea043}
-.bf.w{background:#d29922}.bf.r{background:var(--tg-theme-destructive-text-color,#f85149)}
-.card{background:var(--tg-theme-secondary-bg-color,rgba(128,128,128,.12));border-radius:6px;padding:6px 8px;margin-bottom:4px;border-left:3px solid var(--tg-theme-hint-color,#8b949e)}
-.card.L{border-left-color:#2ea043}
+body{font:12px/1.35 -apple-system,BlinkMacSystemFont,sans-serif;padding:8px 10px;color:var(--tg-theme-text-color,#e6edf3);background:transparent;font-variant-numeric:tabular-nums}
+.hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.tt{font-size:12px;font-weight:700;letter-spacing:.2px}
+.sub{font-size:10px;color:var(--tg-theme-hint-color,#8b949e);margin-left:6px;font-weight:500}
+.kpis{display:flex;gap:6px;margin-bottom:7px;padding:6px 8px;border-radius:8px;background:var(--tg-theme-secondary-bg-color,rgba(128,128,128,.1));border:1px solid rgba(128,128,128,.16)}
+.ki{flex:1;min-width:0}
+.kl{font-size:9px;text-transform:uppercase;letter-spacing:.4px;color:var(--tg-theme-hint-color,#8b949e)}
+.kv{font-size:12px;font-weight:700;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{height:2px;border-radius:2px;background:rgba(128,128,128,.2);margin-top:4px;overflow:hidden}
+.bf{height:100%;background:#10b981}.bf.w{background:#f59e0b}.bf.r{background:var(--tg-theme-destructive-text-color,#ef4444)}
+.tabs{display:flex;gap:4px;margin-bottom:6px}
+.tab{flex:1;font-size:11px;padding:4px 6px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--tg-theme-hint-color,#8b949e);cursor:pointer;font-weight:500}
+.tab.on{background:var(--tg-theme-secondary-bg-color,rgba(128,128,128,.14));border-color:rgba(128,128,128,.2);color:var(--tg-theme-text-color,#e6edf3);font-weight:600}
+.card{background:var(--tg-theme-secondary-bg-color,rgba(128,128,128,.09));border:1px solid rgba(128,128,128,.16);border-radius:8px;padding:7px 9px;margin-bottom:5px}
 .row{display:flex;justify-content:space-between;align-items:center;gap:6px}
-.row+.row{margin-top:4px}
-.nm{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:165px}
-.bdg{font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(128,128,128,.16);color:var(--tg-theme-hint-color,#8b949e)}
-.bdg.L{background:rgba(46,160,67,.18);color:#2ea043}
-.kbps{font-size:11px;color:#2ea043;font-weight:600}.kbps.z{color:var(--tg-theme-hint-color,#8b949e);font-weight:400}
+.row+.row{margin-top:5px}
+.nm{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:168px}
+.st{font-size:10px;font-weight:600;color:var(--tg-theme-hint-color,#8b949e);white-space:nowrap}
+.st.L{color:#10b981}.st.P{opacity:.7}
+.kbps{font-size:11px;font-weight:600;color:#10b981}.kbps.z{color:var(--tg-theme-hint-color,#8b949e);font-weight:400}
 .acts{display:flex;gap:4px}
-.btn{font-size:11px;padding:3px 7px;border-radius:5px;border:none;cursor:pointer;background:var(--tg-theme-button-color,#2481cc);color:var(--tg-theme-button-text-color,#fff)}
-.btn.s{background:rgba(128,128,128,.2);color:var(--tg-theme-text-color,#e6edf3)}
-.btn.r{background:var(--tg-theme-destructive-text-color,#e53935);color:#fff}
-.btn[disabled]{opacity:.5}
-.empty{padding:10px;text-align:center;color:var(--tg-theme-hint-color,#8b949e);font-size:11px}
-.ft{display:flex;justify-content:space-between;align-items:center;margin-top:4px;font-size:10px;color:var(--tg-theme-hint-color,#8b949e)}
-.msg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.btn{font-size:11px;padding:3px 7px;border-radius:6px;border:1px solid rgba(128,128,128,.18);cursor:pointer;background:var(--tg-theme-button-color,#2563eb);color:var(--tg-theme-button-text-color,#fff);line-height:1.2}
+.btn.s{background:rgba(128,128,128,.14);color:var(--tg-theme-text-color,#e6edf3)}
+.btn.r{background:transparent;border-color:rgba(239,68,68,.45);color:var(--tg-theme-destructive-text-color,#ef4444)}
+.btn[disabled]{opacity:.45}
+.empty{padding:12px 8px;text-align:center;color:var(--tg-theme-hint-color,#8b949e);font-size:11px;border:1px dashed rgba(128,128,128,.22);border-radius:8px}
+.ft{display:flex;justify-content:space-between;align-items:center;margin-top:5px;font-size:10px;color:var(--tg-theme-hint-color,#8b949e)}
+.msg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:185px}
 </style></head><body>
-<div class=hd><span class=tt id=th>直播转播监控</span><button class="btn s" id=rf>🔄 刷新</button></div>
-<div class=res id=res></div>
+<div class=hd><div><span class=tt>房间实时面板</span><span class=sub id=th></span></div><button class="btn s" id=rf>🔄 刷新</button></div>
+<div class=kpis id=res></div>
+<div class=tabs id=tabs></div>
 <div id=tasks></div>
 <div class=ft><span class=msg id=msg>就绪</span><span id=ts></span></div>
 <script>
 const W=window.TelegramWidget;
-let st={},busy=false;
+let st={},busy=false,flt='all';
 function $(id){return document.getElementById(id)}
 function pct(v){return Math.min(100,Math.max(0,+(v)||0))}
 function bc(p){return p>85?' r':p>60?' w':''}
@@ -66,30 +68,44 @@ function load(){
 }
 function render(){
   const r=st.r||{},mp=pct(r.m),cp=pct(r.c);
-  $('res').innerHTML=
-    '<div class=ri><div class=rl>内存</div><div class=rv>'+(r.m!=null?r.m+'%':'?')+'</div><div class=bar><div class="bf'+bc(mp)+'" style="width:'+mp+'%"></div></div></div>'+
-    '<div class=ri><div class=rl>CPU</div><div class=rv>'+(r.c!=null?r.c+'%':'?')+'</div><div class=bar><div class="bf'+bc(cp)+'" style="width:'+cp+'%"></div></div></div>'+
-    '<div class=ri><div class=rl>运行</div><div class=rv style="font-size:11px">'+(esc(r.up)||'?')+'</div></div>';
   const tasks=st.t||[];
-  $('th').textContent='直播转播监控 ('+tasks.length+')';
+  const liveN=tasks.filter(function(t){return t.en&&t.on;}).length;
+  const idleN=tasks.filter(function(t){return t.en&&!t.on;}).length;
+  $('th').textContent=liveN+' 推流 / '+tasks.length+' 房';
+  $('res').innerHTML=
+    '<div class=ki><div class=kl>内存</div><div class=kv>'+(r.m!=null?r.m+'%':'?')+'</div><div class=bar><div class="bf'+bc(mp)+'" style="width:'+mp+'%"></div></div></div>'+
+    '<div class=ki><div class=kl>CPU</div><div class=kv>'+(r.c!=null?r.c+'%':'?')+'</div><div class=bar><div class="bf'+bc(cp)+'" style="width:'+cp+'%"></div></div></div>'+
+    '<div class=ki><div class=kl>运行</div><div class=kv>'+(esc(r.up)||'?')+'</div></div>';
+  $('tabs').innerHTML=
+    '<button class="tab'+(flt==='all'?' on':'')+'" data-f=all>全部 '+tasks.length+'</button>'+
+    '<button class="tab'+(flt==='live'?' on':'')+'" data-f=live>推流中 '+liveN+'</button>'+
+    '<button class="tab'+(flt==='idle'?' on':'')+'" data-f=idle>待机 '+idleN+'</button>';
+  const filtered=tasks.filter(function(t){
+    if(flt==='live')return t.en&&t.on;
+    if(flt==='idle')return t.en&&!t.on;
+    return true;
+  });
   if(!tasks.length){
-    $('tasks').innerHTML='<div class=empty>暂无配置房间，发送 /addroom 添加</div>';
+    $('tasks').innerHTML='<div class=empty>暂无房间，发送直播间链接或 /addroom 添加</div>';
+  }else if(!filtered.length){
+    $('tasks').innerHTML='<div class=empty>当前筛选下暂无房间</div>';
   }else{
-    const shown=tasks.slice(0,5);
+    const shown=filtered.slice(0,5);
     let html=shown.map(function(t){
-      const live=t.on&&t.k>0;
-      const cls=!t.en?'P':live?'L':'D';
-      const badge=!t.en?'已暂停':live?'推流中':'待机';
-      const kbps=live?t.k+' kbps':(t.on?'推流启动中':'等待开播');
-      return '<div class="card '+cls+'">'+
-        '<div class=row><span class=nm>'+esc(t.p)+' #'+esc(t.r)+'</span><span class="bdg '+cls+'">'+badge+'</span></div>'+
+      const live=t.en&&t.on&&t.k>0;
+      const cls=!t.en?'P':t.on?'L':'D';
+      const statusTxt=!t.en?'■ 已暂停':t.on?'● 推流中':'○ 待机';
+      const kbps=live?t.k+' kbps':(t.en&&t.on?'推流启动中':(!t.en?'已暂停':'等待开播'));
+      return '<div class=card>'+
+        '<div class=row><span class=nm>'+esc(t.p)+' #'+esc(t.r)+'</span><span class="st '+cls+'">'+statusTxt+'</span></div>'+
         '<div class=row><span class="kbps'+(live?'':' z')+'">'+kbps+'</span>'+
         '<span class=acts>'+
+        '<button class="btn s" data-i="'+t.id+'" data-a="cur"'+(busy?' disabled':'')+'>📈</button>'+
         '<button class="btn s" data-i="'+t.id+'" data-a="snap"'+(busy?' disabled':'')+'>📷</button>'+
-        '<button class="btn '+(t.en?'r':'')+'" data-i="'+t.id+'" data-a="tog"'+(busy?' disabled':'')+'>'+(t.en?'■ 停止':'▶ 开启')+'</button>'+
+        '<button class="btn '+(t.en?'r':'')+'" data-i="'+t.id+'" data-a="tog"'+(busy?' disabled':'')+'>'+(t.en?'■':'▶')+'</button>'+
         '</span></div></div>';
     }).join('');
-    if(tasks.length>5)html+='<div class=empty>其余 '+(tasks.length-5)+' 个房间请发送 /status 查看</div>';
+    if(filtered.length>5)html+='<div class=empty>其余 '+(filtered.length-5)+' 个房间请在聊天窗查看 /rooms</div>';
     $('tasks').innerHTML=html;
   }
   const d=new Date();
@@ -113,6 +129,11 @@ function sendReq(payload){
   });
 }
 $('rf').onclick=function(){sendReq({a:'ref'});};
+$('tabs').onclick=function(e){
+  const b=e.target&&e.target.closest?e.target.closest('button[data-f]'):e.target;
+  if(!b||!b.dataset||!b.dataset.f)return;
+  flt=b.dataset.f;render();
+};
 $('tasks').onclick=function(e){
   const b=e.target&&e.target.closest?e.target.closest('button[data-a]'):e.target;
   if(!b||!b.dataset||!b.dataset.a)return;
@@ -162,7 +183,10 @@ function buildChatData({ tasks = [], system = {} } = {}) {
     ram: system.serviceMem ? truncateUtf8(system.serviceMem, 16) : null,
   };
 
-  const mappedTasks = tasks.map((entry) => ({
+  const rank = (entry) => (entry.status !== 'ENABLED' ? 2 : entry.traffic?.running ? 0 : 1);
+  const sortedTasks = [...tasks].sort((a, b) => rank(a) - rank(b));
+
+  const mappedTasks = sortedTasks.map((entry) => ({
     id: entry.id,
     p: platformAbbr(entry.platform),
     r: String(entry.room_id),
@@ -189,7 +213,7 @@ function buildCaption({ tasks = [], system = {} } = {}) {
   const active = tasks.filter((t) => t.traffic?.running).length;
   const cpu = system.cpuPercent != null ? `${Math.round(system.cpuPercent)}%` : '?';
   const mem = system.memPct != null ? `${Math.round(system.memPct)}%` : '?';
-  return `📊 实时监控 · 推流 ${active}/${enabled} · CPU ${cpu} · 内存 ${mem}`;
+  return `🎛️ 房间实时面板 · 推流 ${active}/${enabled} · CPU ${cpu} · 内存 ${mem}`;
 }
 
 function platformAbbr(p) {

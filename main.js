@@ -1,5 +1,14 @@
 require('dotenv').config({ quiet: true });
 
+// 静默 Node.js 内置 node:sqlite 的 ExperimentalWarning（其余警告照常输出）
+const _origEmitWarning = process.emitWarning.bind(process);
+process.emitWarning = (warning, ...args) => {
+  const msg = typeof warning === 'string' ? warning : warning?.message || '';
+  const type = typeof args[0] === 'string' ? args[0] : args[0]?.type || warning?.name || '';
+  if (type === 'ExperimentalWarning' && /sqlite/i.test(msg)) return;
+  return _origEmitWarning(warning, ...args);
+};
+
 const fs = require('node:fs');
 const http = require('node:http');
 const crypto = require('node:crypto');

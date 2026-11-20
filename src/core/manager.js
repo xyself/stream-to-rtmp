@@ -271,6 +271,8 @@ class StreamManager {
     this._fallbackStartedAt = null;
     this._fallbackTimer = null;
     this._fallbackOfflineCount = 0;
+    this._checkingBlackFrame = false;
+    this._verifyingLive = false;
 
     this.ffmpeg = new FFmpegService({
       roomId: task.room_id,
@@ -281,7 +283,11 @@ class StreamManager {
       transcodeAudio: this.encodingConfig.transcodeAudio,
       onStart: () => this._handleFfmpegStarted(),
       onError: (err) => {
-        if (!this.isStopping) this.handleFfmpegError(err.message);
+        if (!this.isStopping) {
+          this.handleFfmpegError(err.message).catch((e) => {
+            console.error(`[${this.task.room_id}] 处理 FFmpeg 错误异常:`, e.message);
+          });
+        }
       },
       onOutputFailed: (targetUrl) => {
         if (this.isStopping) return;
@@ -512,13 +518,15 @@ class StreamManager {
       lastProgressAt: stats.lastProgressAt ?? null,
     });
 
-    if (!evaluation.isStalling && stats.bitrateKbps > 0 && now - (this._lastSampledAt || 0) >= 55000) {
+    if (!evaluation.isStalling && stats.bitrateKbps > 0 && now - (this._lastSampledAt || 0) >= 28000) {
       this._lastSampledAt = now;
       db.recordBitrateSample?.(this.task.id, Math.round(stats.bitrateKbps), now);
     }
 
     if (evaluation.frozen) {
-      this.handleFfmpegError(`检测到画面冻结 (${evaluation.freezeReason || 'Bitrate 0'})，正在自动重启...`);
+      this.handleFfmpegError(`检测到画面冻结 (${evaluation.freezeReason || 'Bitrate 0'})，正在自动重启...`).catch((e) => {
+        console.error(`[${this.task.room_id}] 冻结重启处理异常:`, e.message);
+      });
       return;
     }
 
@@ -551,7 +559,8 @@ class StreamManager {
       this.checkBlackFrame().catch(() => {});
     }
 
-    if (evaluation.shouldVerifyLiveStatus) {
+    if (evaluation.shouldVerifyLiveStatus && !this._verifyingLive) {
+      this._verifyingLive = true;
       this.room
         .getInfo()
         .then((info) => {
@@ -566,20 +575,26 @@ class StreamManager {
         })
         .catch((err) => {
           console.error(`[${this.task.room_id}] 平台状态检查失败:`, err.message);
+        })
+        .finally(() => {
+          this._verifyingLive = false;
         });
     }
   }
 
   async checkBlackFrame({ force = false } = {}) {
-    if (this.isStopping || !this.currentStreamUrl) return;
+    if (this.isStopping || !this.currentStreamUrl || this._checkingBlackFrame) return;
     const enabled = force || config.health.blackCheckEnabled || db.getSetting?.('black_frame_check') === '1';
     if (!enabled) return;
 
+    this._checkingBlackFrame = true;
     let isBlack = false;
     try {
       isBlack = await this.ffmpeg.detectBlackFrame(this.currentStreamUrl, { seconds: 20, duration: 15 });
     } catch {
       return;
+    } finally {
+      this._checkingBlackFrame = false;
     }
     if (this.isStopping) return;
     if (isBlack && Date.now() - this.health.lastBlackAlertAt > config.health.blackAlertCooldownMs) {
@@ -731,11 +746,19 @@ class StreamManager {
     await this.stopStreaming();
     if (this.isStopping || gen !== this._sessionGen) return false;
 
-    const imgPath = fallbackImage.ensureFallbackImage();
-    this.isFallbackActive = true;
-    this._fallbackStartedAt = Date.now();
-    this._fallbackOfflineCount = initialOfflineCount;
-    this.process = this.ffmpeg.startFallback(imgPath);
+    try {
+      const imgPath = fallbackImage.ensureFallbackImage();
+      this.process = this.ffmpeg.startFallback(imgPath);
+      this.isFallbackActive = true;
+      this._fallbackStartedAt = Date.now();
+      this._fallbackOfflineCount = initialOfflineCount;
+    } catch (err) {
+      this.isFallbackActive = false;
+      this._fallbackStartedAt = null;
+      this._fallbackOfflineCount = 0;
+      this.process = null;
+      throw err;
+    }
 
     console.log(`[${this.task.room_id}] 已切入轻量断流保底图（原因: ${reason}）`);
     this._emitNotify({
@@ -1023,7 +1046,9 @@ class StreamManager {
   }
 
   handleError(msg) {
-    this.handleFfmpegError(msg);
+    return this.handleFfmpegError(msg).catch((e) => {
+      console.error(`[${this.task.room_id}] 处理错误异常:`, e.message);
+    });
   }
 
   scheduleStart(delay) {
@@ -1033,7 +1058,9 @@ class StreamManager {
     this._pendingTimer = setTimeout(() => {
       this._pendingTimer = null;
       if (this.isStopping) return;
-      this.start();
+      this.start().catch((err) => {
+        console.error(`[${this.task.room_id}] 定时启动推流异常:`, err.message);
+      });
     }, delay);
   }
 

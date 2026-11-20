@@ -230,3 +230,137 @@ test('StreamManager lightweight fallback transitions: enter fallback, recover st
     }
   }
 });
+
+test('Quick Snap captures ONLY actively streaming rooms, Room Management excludes backup/Gist and supports filter tabs + widget + per-room curves', async () => {
+  const roomHandlers = require('../src/bot/handlers/room');
+  const scheduler = require('../src/core/scheduler');
+  const views = require('../src/bot/views');
+  const { buildTaskListKeyboard } = require('../src/bot/index');
+
+  // 1. 验证纯过滤函数严格只选正在推流的房间
+  const sampleTasks = [
+    { id: 1, platform: 'bilibili', room_id: '1001', status: 'ENABLED', traffic: { running: false } },
+    { id: 2, platform: 'douyu', room_id: '2002', status: 'ENABLED', traffic: { running: true, bitrateKbps: 3200, roomInfo: { hostName: '主播A' } } },
+    { id: 3, platform: 'douyin', room_id: '3003', status: 'DISABLED', traffic: { running: true } },
+    { id: 4, platform: 'bilibili', room_id: '4004', status: 'ENABLED', traffic: { running: true, bitrateKbps: 4500, roomInfo: { hostName: '主播B' } } },
+  ];
+  const streamingOnly = roomHandlers.selectStreamingTasks(sampleTasks, { isTaskRunning: () => false });
+  assert.deepEqual(streamingOnly.map((t) => t.room_id), ['2002', '4004']);
+
+  // 2. 验证空房间管理界面包含 blockquote 卡片，且绝不包含 导入备份 / 从 Gist 恢复
+  const emptyHtml = views.renderRoomList([]);
+  assert.ok(emptyHtml.includes('<blockquote>'));
+  assert.ok(emptyHtml.includes('房间管理中心'));
+  assert.equal(emptyHtml.includes('恢复备份'), false);
+  const emptyKb = buildTaskListKeyboard([]);
+  const emptyCbs = emptyKb.inline_keyboard.flat().map((b) => b.callback_data);
+  assert.ok(emptyCbs.includes('quick_add_room'));
+  assert.ok(emptyCbs.includes('back_list'));
+  assert.equal(emptyCbs.includes('global_import_backup'), false, 'Room Management must not contain Import Backup');
+  assert.equal(emptyCbs.includes('global_restore_gist'), false, 'Room Management must not contain Restore from Gist');
+
+  // 3. 验证非空房间管理界面：筛选标签 + 推流优先排序 + Widget 实时卡片入口 + 无备份/Gist 按钮
+  const listHtml = views.renderRoomList(sampleTasks, 'all');
+  assert.ok(listHtml.includes('<blockquote>'));
+  assert.ok(listHtml.includes('正在推流'));
+  const listKb = buildTaskListKeyboard(sampleTasks, 'all');
+  const listCbs = listKb.inline_keyboard.flat().map((b) => b.callback_data);
+  assert.ok(listCbs.includes('rooms_filter:all'));
+  assert.ok(listCbs.includes('rooms_filter:live'));
+  assert.ok(listCbs.includes('rooms_filter:idle'));
+  assert.ok(listCbs.includes('rooms_filter:paused'));
+  assert.ok(listCbs.includes('open_widget'));
+  assert.ok(listCbs.includes('quick_snap_live'));
+  assert.ok(listCbs.includes('quick_add_room'));
+  assert.equal(listCbs.includes('global_import_backup'), false);
+  assert.equal(listCbs.includes('global_restore_gist'), false);
+
+  const manageCbs = listCbs.filter((cb) => cb.startsWith('manage:'));
+  assert.deepEqual(manageCbs, ['manage:2', 'manage:4', 'manage:1', 'manage:3']);
+
+  // 筛选仅推流中
+  const liveOnlyKb = buildTaskListKeyboard(sampleTasks, 'live');
+  const liveOnlyManage = liveOnlyKb.inline_keyboard.flat().map((b) => b.callback_data).filter((cb) => cb.startsWith('manage:'));
+  assert.deepEqual(liveOnlyManage, ['manage:2', 'manage:4']);
+
+  // 4. 验证分房间分钟级曲线键盘（固定 30分/1小时/3小时/6小时/12小时 + 多房切换）
+  const curveKb = roomHandlers.buildCurveKeyboard('2', '1h', sampleTasks);
+  const curveCbs = curveKb.inline_keyboard.flat().map((b) => b.callback_data);
+  for (const win of ['30m', '1h', '3h', '6h', '12h']) {
+    assert.ok(curveCbs.includes(`curve:2:${win}`), `missing curve window ${win}`);
+  }
+  assert.ok(curveCbs.includes('open_curve_menu'));
+  assert.ok(curveCbs.includes('manage:2'));
+
+  // 5. 端到端验证点击「📷 快捷截图」：仅推流中房间直接出图，绝不弹出房间选择列表
+  const hearsMap = new Map();
+  const fakeBot = {
+    command: () => {},
+    hears: (pattern, fn) => hearsMap.set(pattern, fn),
+    callbackQuery: () => {},
+    on: () => {},
+  };
+
+  const sentReplies = [];
+  const sentPhotos = [];
+  roomHandlers.register(fakeBot, {
+    safeEditMessageText: async () => {},
+    safeEditMessageMedia: async () => {},
+    ephemeralReply: async (ctx, text, opts) => { sentReplies.push({ text, opts }); },
+    ephemeralPhoto: async (ctx, photo, opts) => { sentPhotos.push({ photo, opts }); },
+    buildTaskDetailKeyboard: () => ({}),
+    buildTaskListKeyboard,
+    mainKeyboard: {},
+  });
+
+  const snapHandler = hearsMap.get('📷 快捷截图');
+  assert.equal(typeof snapHandler, 'function');
+
+  const origGetTrafficStats = scheduler.getTrafficStats;
+  const origGetTaskManager = scheduler.getTaskManager;
+  const origIsTaskRunning = scheduler.isTaskRunning;
+
+  try {
+    // 场景 A：有已启用房间但均未推流 -> 提示暂无推流中房间，不弹选房列表
+    scheduler.getTrafficStats = () => [sampleTasks[0]];
+    scheduler.isTaskRunning = () => false;
+    await snapHandler({
+      message: { text: '📷 快捷截图' },
+      reply: async (text, opts) => { sentReplies.push({ text, opts }); },
+    });
+    assert.equal(sentPhotos.length, 0);
+    assert.equal(sentReplies.length, 1);
+    assert.ok(sentReplies[0].text.includes('暂无正在推流的房间'));
+    assert.ok(sentReplies[0].text.includes('<blockquote>'));
+
+    // 场景 B：2 路推流中 + 1 路待机 -> 直接为 2 路推流中房间抓帧发送，跳过待机房
+    sentReplies.length = 0;
+    sentPhotos.length = 0;
+    const capturedIds = [];
+    scheduler.getTrafficStats = () => sampleTasks;
+    scheduler.isTaskRunning = (t) => Boolean(t.traffic?.running);
+    scheduler.getTaskManager = (t) => ({
+      captureSnapshot: async () => {
+        capturedIds.push(t.room_id);
+        return Buffer.from(`jpeg-${t.room_id}`);
+      },
+    });
+
+    await snapHandler({
+      message: { text: '📷 快捷截图' },
+      reply: async (text, opts) => { sentReplies.push({ text, opts }); },
+    });
+
+    assert.deepEqual(capturedIds, ['2002', '4004']);
+    assert.equal(sentPhotos.length, 2);
+    assert.ok(sentPhotos[0].opts.caption.includes('#2002'));
+    assert.ok(sentPhotos[0].opts.caption.includes('[1/2]'));
+    assert.ok(sentPhotos[1].opts.caption.includes('#4004'));
+    assert.ok(sentPhotos[1].opts.caption.includes('[2/2]'));
+  } finally {
+    scheduler.getTrafficStats = origGetTrafficStats;
+    scheduler.getTaskManager = origGetTaskManager;
+    scheduler.isTaskRunning = origIsTaskRunning;
+  }
+});
+

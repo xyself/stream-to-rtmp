@@ -5,6 +5,7 @@ const StreamManager = require('./manager');
 class Scheduler {
   constructor({ onNotify = () => {} } = {}) {
     this.runningManagers = new Map();
+    this._startingKeys = new Set();
     this.timer = null;
     this.onNotify = onNotify;
     this.bootGraceUntil = 0;
@@ -16,6 +17,11 @@ class Scheduler {
 
   isTaskRunning(task) {
     return this.runningManagers.has(this.buildTaskKey(task));
+  }
+
+  isTaskStreaming(task) {
+    const manager = this.getTaskManager(task);
+    return Boolean(manager?.getTrafficStats?.().running);
   }
 
   getTaskManager(task) {
@@ -37,57 +43,71 @@ class Scheduler {
 
   stopManager(task) {
     const taskKey = this.buildTaskKey(task);
+    this._startingKeys.delete(taskKey);
     const manager = this.runningManagers.get(taskKey);
-    if (!manager) return;
-    manager.stop();
+    if (!manager) return Promise.resolve();
     this.runningManagers.delete(taskKey);
+    return Promise.resolve(manager.stop());
   }
 
   async refreshTask(task) {
     if (!task) return;
-    this.stopManager(task);
-    if (task.status !== 'ENABLED') return;
-
+    await this.stopManager(task);
     const latestTask = db.getTaskById?.(task.id) || task;
+    if (latestTask.status !== 'ENABLED') return;
+
     const manager = this.createManager(latestTask);
     await manager.start();
   }
 
   async tick() {
+    if (this._stopped) return;
     const enabledTasks = db.getEnabledTasks();
     const enabledKeys = new Set(enabledTasks.map((task) => this.buildTaskKey(task)));
 
     for (const [taskKey, manager] of this.runningManagers.entries()) {
       if (!enabledKeys.has(taskKey)) {
-        manager.stop();
         this.runningManagers.delete(taskKey);
+        Promise.resolve(manager.stop()).catch(() => {});
       } else if (typeof manager.checkHealth === 'function') {
         manager.checkHealth();
       }
     }
 
-    const toStart = enabledTasks.filter((task) => !this.runningManagers.has(this.buildTaskKey(task)));
+    const toStart = enabledTasks.filter((task) => {
+      const key = this.buildTaskKey(task);
+      return !this.runningManagers.has(key) && !this._startingKeys.has(key);
+    });
     if (toStart.length > 0) {
+      for (const task of toStart) {
+        this._startingKeys.add(this.buildTaskKey(task));
+      }
       (async () => {
         for (const task of toStart) {
-          if (this._stopped) return;
           const taskKey = this.buildTaskKey(task);
-          if (this.runningManagers.has(taskKey)) continue;
-          const manager = this.createManager(task);
           try {
-            await manager.start();
-          } catch (err) {
-            const msg = `任务启动失败: ${err.message}`;
-            if (manager.lastErrorMessage !== msg) {
-              manager.lastErrorMessage = msg;
-              this.onNotify?.({
-                taskId: task.id,
-                type: 'error',
-                message: msg,
-              });
+            if (this._stopped || !this._startingKeys.has(taskKey)) continue;
+            if (this.runningManagers.has(taskKey)) continue;
+            const manager = this.createManager(task);
+            try {
+              await manager.start();
+            } catch (err) {
+              const msg = `任务启动失败: ${err.message}`;
+              if (manager.lastErrorMessage !== msg) {
+                manager.lastErrorMessage = msg;
+                this.onNotify?.({
+                  taskId: task.id,
+                  type: 'error',
+                  message: msg,
+                });
+              }
             }
+          } finally {
+            this._startingKeys.delete(taskKey);
           }
-          await new Promise((resolve) => setTimeout(resolve, config.polling.staggerStartMs));
+          if (!this._stopped) {
+            await new Promise((resolve) => setTimeout(resolve, config.polling.staggerStartMs));
+          }
         }
       })().catch(() => {});
     }
@@ -168,6 +188,7 @@ class Scheduler {
 
   stopAll() {
     this._stopped = true;
+    this._startingKeys.clear();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

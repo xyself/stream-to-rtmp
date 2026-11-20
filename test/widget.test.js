@@ -13,6 +13,10 @@ test('WIDGET_HTML complies with Bot API 10.4 size, encoding, and TelegramWidget 
   assert.equal(widget.WIDGET_HTML.includes('onChatData'), false);
   assert.equal(widget.WIDGET_HTML.includes("onEvent('chatDataChanged'"), true);
   assert.equal(widget.WIDGET_HTML.includes('W.chatData'), true);
+  assert.equal(widget.WIDGET_HTML.includes('tabular-nums'), true);
+  assert.equal(widget.WIDGET_HTML.includes('data-a="cur"'), true);
+  assert.equal(widget.WIDGET_HTML.includes('data-f=live'), true);
+  assert.equal(widget.WIDGET_HTML.includes('border-left:3px'), false);
 });
 
 test('buildChatData stays valid JSON within 1024 UTF-8 bytes even with many rooms', () => {

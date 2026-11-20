@@ -211,7 +211,7 @@ test('buildTaskDetailKeyboard includes editrtmp, editcookie, curve, diagnose, tr
     const detailCallbacks = detailKb.inline_keyboard.flat().map((b) => b.callback_data);
     assert.ok(detailCallbacks.includes('editrtmp:42'), 'Should include editrtmp:42 button');
     assert.ok(detailCallbacks.includes('editcookie:42'), 'Should include editcookie:42 button');
-    assert.ok(detailCallbacks.includes('curve:42:noon'), 'Should include curve:42:noon button');
+    assert.ok(detailCallbacks.includes('curve:42:1h'), 'Should include curve:42:1h button');
     assert.ok(detailCallbacks.includes('diagnose:42'), 'Should include diagnose:42 button');
     assert.ok(detailCallbacks.includes('transcode_mode:42'), 'Should include transcode_mode:42 button');
     assert.ok(detailCallbacks.includes('del_confirm:42'), 'Should use del_confirm:42 for delete confirmation');
@@ -223,7 +223,7 @@ test('buildTaskDetailKeyboard includes editrtmp, editcookie, curve, diagnose, tr
     assert.ok(dashCallbacks.includes('global_set_restart_hour'), 'Should include global_set_restart_hour button');
     assert.ok(dashCallbacks.includes('global_toggle_audio_fix'), 'Should include global_toggle_audio_fix button');
     assert.ok(dashCallbacks.includes('global_toggle_auto_backup'), 'Should include global_toggle_auto_backup button');
-    assert.ok(dashCallbacks.includes('curve:all:noon'), 'Should include curve:all:noon button');
+    assert.ok(dashCallbacks.includes('open_curve_menu'), 'Should include open_curve_menu button');
 });
 
 test('different Bilibili/Douyin rooms support independent per-room Cookies and transcode_mode in DB, backup snapshot, and StreamManager', () => {
@@ -370,6 +370,65 @@ test('curveChart defaults to Beijing 12:00->12:00 window, separates 3 broadcast 
     assert.ok(caption.includes('#1场'));
     assert.ok(caption.includes('#2场'));
     assert.ok(caption.includes('#3场'));
+});
+
+test('curveChart supports minute-scale rolling windows (30m/1h/3h/6h/12h) and renders 1280x640 HiDPI dark dashboard PNG', () => {
+    const curveChart = require('../src/core/curve-chart');
+    const views = require('../src/bot/views');
+
+    const nowMs = Date.UTC(2026, 4, 10, 12, 30, 0);
+    const expectedMinutes = { '30m': 30, '1h': 60, '3h': 180, '6h': 360, '12h': 720 };
+    for (const [mode, mins] of Object.entries(expectedMinutes)) {
+        const win = curveChart.getCurveWindow(mode, nowMs);
+        assert.equal(win.mode, mode);
+        assert.equal(win.isMinuteScale, true);
+        assert.equal(win.durationMin, mins);
+        assert.equal(win.endMs - win.startMs, mins * 60 * 1000);
+        assert.equal(win.tickLabels.length, 7);
+    }
+
+    const win1h = curveChart.getMinuteWindow('1h', nowMs);
+    const samples = [];
+    for (let s = 0; s <= 120; s += 1) {
+        const ts = win1h.startMs + s * 30 * 1000;
+        const kbps = Math.round(3200 + 650 * Math.sin(s / 12) + 180 * Math.cos(s / 4));
+        samples.push({ ts, kbps });
+    }
+
+    const rendered = curveChart.renderWaveChartPng({
+        samples,
+        mode: '1h',
+        nowMs,
+        title: 'BILI #2233',
+        currentKbps: 3520,
+    });
+    assert.ok(Buffer.isBuffer(rendered.pngBuffer));
+    assert.equal(rendered.pngBuffer.readUInt32BE(16), 1280, 'HiDPI chart width should be 1280');
+    assert.equal(rendered.pngBuffer.readUInt32BE(20), 640, 'HiDPI chart height should be 640');
+    assert.ok(rendered.avgKbps > 2500 && rendered.peakKbps >= rendered.avgKbps);
+
+    // Empty state should also produce a valid 1280x640 PNG without throwing
+    const emptyRendered = curveChart.renderWaveChartPng({
+        samples: [],
+        mode: '30m',
+        nowMs,
+        title: 'DOUYU #9999',
+    });
+    assert.equal(emptyRendered.pngBuffer.readUInt32BE(16), 1280);
+    assert.equal(emptyRendered.pngBuffer.readUInt32BE(20), 640);
+
+    const caption = views.renderWaveChartCaption({
+        task: { id: 1, platform: 'bilibili', room_id: '2233', traffic: { bitrateKbps: 3520, roomInfo: { hostName: '测试主播' } } },
+        windowInfo: win1h,
+        sessions: rendered.sessions,
+        unicodeWave: curveChart.renderUnicodeWave(samples, win1h.startMs, win1h.endMs),
+        avgKbps: rendered.avgKbps,
+        peakKbps: rendered.peakKbps,
+        currentKbps: 3520,
+    });
+    assert.ok(caption.includes('近 1 小时'));
+    assert.ok(caption.includes('3520k'));
+    assert.ok(caption.includes('测试主播'));
 });
 
 test('ffmpegInstaller resolves priority order, returns runtime info with resolved installation path, and Web Dashboard renders FFmpeg verification component', () => {

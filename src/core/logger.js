@@ -4,6 +4,7 @@ const config = require('../config');
 
 const MAX_RING_SIZE = 500;
 const ERROR_PATTERN = /error|❌|失败|fail|exception|超时|断开|熔断|warn|⚠️/i;
+const BENIGN_NOTICE_PATTERN = /ExperimentalWarning:\s*SQLite|未配置\s*DASHBOARD_TOKEN/i;
 
 function formatTimestamp(ms = Date.now(), timeZone = config.timezone) {
   try {
@@ -156,7 +157,7 @@ class Logger {
       return ['暂无运行日志记录'];
     }
     if (effectiveOnlyErrors) {
-      sourceLines = sourceLines.filter((l) => ERROR_PATTERN.test(l));
+      sourceLines = sourceLines.filter((l) => ERROR_PATTERN.test(l) && !BENIGN_NOTICE_PATTERN.test(l));
     }
     return sourceLines.slice(-effectiveLimit).map((l) => maskUrlInText(l));
   }

@@ -64,3 +64,9 @@ typings/
 .next
 
 .idea
+
+# Auto-downloaded FFmpeg static binary (>100MB, GitHub rejects) & local tool artifacts
+bin/
+.aistudio/
+.playwright-cli/
+bun.lock

@@ -25,6 +25,55 @@ function getHydratedTaskWithTraffic(taskId) {
   return db.getTaskById(taskId);
 }
 
+/**
+ * 筛选当前正在推流中的房间（严格区分“正在推流”与“仅启用待机”）
+ */
+function selectStreamingTasks(tasks = [], sched = scheduler) {
+  return (Array.isArray(tasks) ? tasks : []).filter(
+    (t) => t && t.status === 'ENABLED' && Boolean(t.traffic?.running || sched?.isTaskStreaming?.(t))
+  );
+}
+
+/**
+ * 构建单房间分钟级曲线的交互键盘：
+ * Row 1: 固定 5 档分钟级窗口 [30分 | 1小时 | 3小时 | 6小时 | 12小时]
+ * Row 2 (多房间时): [◀ 上一房 | 📋 切换房间 | 下一房 ▶]
+ * Row 3: [⚙️ 房间控制台 | 🔄 刷新]
+ */
+function buildCurveKeyboard(targetId, activeMode = '1h', allTasks = []) {
+  const kb = new InlineKeyboard();
+  const minuteModes = curveChart.MINUTE_WINDOW_ORDER || ['30m', '1h', '3h', '6h', '12h'];
+  const shortLabels = { '30m': '30分', '1h': '1小时', '3h': '3小时', '6h': '6小时', '12h': '12小时' };
+
+  for (const m of minuteModes) {
+    const label = activeMode === m ? `✓${shortLabels[m]}` : shortLabels[m];
+    kb.text(label, `curve:${targetId}:${m}`);
+  }
+  kb.row();
+
+  const sorted = views.sortTasksByActivity ? views.sortTasksByActivity(allTasks || []) : (allTasks || []);
+  if (targetId !== 'all' && sorted.length > 1) {
+    const idx = sorted.findIndex((t) => String(t.id) === String(targetId));
+    const safeIdx = idx >= 0 ? idx : 0;
+    const prevTask = sorted[(safeIdx - 1 + sorted.length) % sorted.length];
+    const nextTask = sorted[(safeIdx + 1) % sorted.length];
+    const safeMode = minuteModes.includes(activeMode) ? activeMode : '1h';
+    kb.text('◀ 上一房', `curve:${prevTask.id}:${safeMode}`)
+      .text('📋 切换房间', 'open_curve_menu')
+      .text('下一房 ▶', `curve:${nextTask.id}:${safeMode}`)
+      .row();
+  }
+
+  if (targetId !== 'all') {
+    kb.text('⚙️ 房间控制台', `manage:${targetId}`)
+      .text('🔄 刷新', `curve:${targetId}:${activeMode}`);
+  } else {
+    kb.text('📋 分房查看', 'open_curve_menu')
+      .text('🔄 刷新', `curve:all:${activeMode}`);
+  }
+  return kb;
+}
+
 async function saveRoomTask(ctx, { roomId, platform, targetUrl, extraTargetUrls = [] }) {
   db.addTask({ platform, roomId, targetUrl, extraTargetUrls });
   await scheduler.tick?.();
@@ -53,7 +102,16 @@ async function saveRoomTask(ctx, { roomId, platform, targetUrl, extraTargetUrls 
   await ctx.reply(message, { parse_mode: 'HTML' });
 }
 
-function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, buildTaskDetailKeyboard, buildTaskListKeyboard, mainKeyboard }) {
+function register(bot, {
+  safeEditMessageText,
+  safeEditMessageMedia,
+  ephemeralReply,
+  ephemeralPhoto,
+  sendWidgetToChat,
+  buildTaskDetailKeyboard,
+  buildTaskListKeyboard,
+  mainKeyboard,
+}) {
   const sendReply = ephemeralReply || ((ctx, text, opts) => ctx.reply(text, opts));
   const sendPhoto = ephemeralPhoto || ((ctx, photo, opts) => ctx.replyWithPhoto(photo, opts));
 
@@ -92,58 +150,111 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     const tasks = scheduler.getTrafficStats();
     await ctx.reply(views.renderRoomList(tasks), {
       parse_mode: 'HTML',
-      reply_markup: tasks.length ? buildTaskListKeyboard(tasks) : mainKeyboard,
+      reply_markup: buildTaskListKeyboard(tasks),
     });
   };
 
-  const showQuickSnap = async (ctx) => {
-    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/snap\s*/i, '').trim();
-    const tasks = scheduler.getTrafficStats();
+  const captureAndSendSnapshot = async (ctx, task, { indexLabel = '' } = {}) => {
+    const manager = scheduler.getTaskManager?.(task);
+    if (!manager) {
+      throw new Error('推流管理器未就绪');
+    }
+    const imageBuffer = await manager.captureSnapshot();
+    const kb = new InlineKeyboard()
+      .text('🔄 重新抓帧', `screenshot:${task.id}`)
+      .text('⚙️ 房间控制台', `manage:${task.id}`);
+    await sendPhoto(
+      ctx,
+      new InputFile(imageBuffer, `screenshot_${task.room_id}.jpg`),
+      {
+        caption: views.renderSnapshotCaption(task, { indexLabel }),
+        parse_mode: 'HTML',
+        reply_markup: kb,
+      }
+    );
+  };
+
+  const showQuickSnap = async (ctx, isCallback = false) => {
+    const raw = isCallback ? '' : getMessageTextOrEmpty(ctx.message).replace(/^\/snap\s*/i, '').trim();
+    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
+
+    // 显式指定了 /snap 房间号
     if (raw && isNumericRoomId(raw)) {
       const target = tasks.find((t) => String(t.room_id) === raw);
       if (!target) {
-        await ctx.reply(`❌ 未找到房间 #${raw}`);
+        await sendReply(ctx, `❌ 未找到房间 <code>#${views.escapeHtml(raw)}</code>`, { parse_mode: 'HTML' });
         return;
       }
-      const manager = scheduler.getTaskManager?.(target);
-      if (!manager || target.status !== 'ENABLED') {
-        await ctx.reply(`❌ 房间 #${raw} 未启用或未运行，无法截图`);
+      const isStreaming = target.status === 'ENABLED' && Boolean(target.traffic?.running || scheduler.isTaskStreaming?.(target));
+      if (!isStreaming) {
+        const kb = new InlineKeyboard()
+          .text('⚙️ 房间控制台', `manage:${target.id}`)
+          .text('🩺 诊断测试', `diagnose:${target.id}`);
+        await sendReply(
+          ctx,
+          `⏸️ <b>${views.escapeHtml(views.platformLabel(target.platform))} #${views.escapeHtml(target.room_id)}</b> 当前未在推流中，无法抓取实时画面。`,
+          { parse_mode: 'HTML', reply_markup: kb }
+        );
         return;
       }
       try {
-        const imageBuffer = await manager.captureSnapshot();
-        await sendPhoto(
-          ctx,
-          new InputFile(imageBuffer, `screenshot_${target.room_id}.jpg`),
-          { caption: `📸 ${views.platformLabel(target.platform)} #${target.room_id} 截图\n${new Date().toLocaleString('zh-CN', { hour12: false })}` }
-        );
+        await captureAndSendSnapshot(ctx, target);
       } catch (err) {
-        await sendReply(ctx, `❌ 获取截图失败: ${err.message}`);
+        await sendReply(ctx, `❌ 获取截图失败: ${views.escapeHtml(err.message || '未知错误')}`, { parse_mode: 'HTML' });
       }
       return;
     }
 
-    const enabled = tasks.filter((t) => t.status === 'ENABLED');
-    if (enabled.length === 0) {
-      await ctx.reply('📷 当前没有已启用的房间可截图。', { reply_markup: mainKeyboard });
+    // 默认快捷截图：直接抓取所有【正在推流中】的房间，无需手动再选房间
+    const streaming = selectStreamingTasks(tasks, scheduler);
+    if (streaming.length === 0) {
+      if (isCallback) {
+        await ctx.answerCallbackQuery({ text: '⏸️ 当前暂无正在推流的房间', show_alert: true }).catch(() => {});
+        return;
+      }
+      const emptyKb = new InlineKeyboard();
+      if (tasks.length === 0) {
+        emptyKb.text('➕ 立即添加房间', 'quick_add_room').text('🏠 房间管理', 'back_list');
+      } else {
+        emptyKb.text('📊 查看推流状态', 'tstatus_back').text('🏠 房间管理', 'back_list');
+      }
+      await sendReply(ctx, views.renderQuickSnapEmpty(tasks), {
+        parse_mode: 'HTML',
+        reply_markup: emptyKb,
+      });
       return;
     }
-    const kb = new InlineKeyboard();
-    enabled.forEach((t) => {
-      const running = t.traffic?.running;
-      const icon = running ? '🟢' : '✅';
-      const host = t.traffic?.roomInfo?.hostName ? ` (${t.traffic.roomInfo.hostName})` : '';
-      kb.text(`${icon} ${views.platformLabel(t.platform)} #${t.room_id}${host}`, `screenshot:${t.id}`).row();
-    });
-    await ctx.reply('📷 <b>快捷截图</b>\n点击下方房间立即抓取当前实时画面（也可直接发 <code>/snap 房间号</code>）：', {
-      parse_mode: 'HTML',
-      reply_markup: kb,
-    });
+
+    if (isCallback) {
+      await ctx.answerCallbackQuery(`📸 正在为 ${streaming.length} 路推流抓帧...`).catch(() => {});
+    } else if (streaming.length > 1) {
+      await ctx.reply(`📷 检测到 <b>${streaming.length}</b> 路正在推流，正在自动抓帧...`, { parse_mode: 'HTML' });
+    }
+
+    // 顺序逐路抓帧，避免在 Serv00 / 低配容器中并发拉起多个 FFmpeg 截图进程打满配额
+    const failed = [];
+    for (let i = 0; i < streaming.length; i += 1) {
+      const task = streaming[i];
+      const indexLabel = streaming.length > 1 ? `[${i + 1}/${streaming.length}]` : '';
+      try {
+        await captureAndSendSnapshot(ctx, task, { indexLabel });
+      } catch (err) {
+        failed.push(`${views.platformLabel(task.platform)} #${task.room_id}：${err.message || '未知错误'}`);
+      }
+    }
+
+    if (failed.length > 0) {
+      await sendReply(
+        ctx,
+        `⚠️ <b>部分推流抓帧失败</b>\n<blockquote>${failed.map((f) => `• ${views.escapeHtml(f)}`).join('\n')}</blockquote>`,
+        { parse_mode: 'HTML' }
+      );
+    }
   };
 
   const showQuickDiagnose = async (ctx) => {
     const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/diagnose\s*/i, '').trim();
-    const tasks = scheduler.getTrafficStats();
+    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
     if (raw && isNumericRoomId(raw)) {
       const target = tasks.find((t) => String(t.room_id) === raw);
       if (!target) {
@@ -164,7 +275,11 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     }
 
     if (tasks.length === 0) {
-      await ctx.reply('🩺 当前没有配置任何房间。', { reply_markup: mainKeyboard });
+      const emptyKb = new InlineKeyboard().text('➕ 立即添加房间', 'quick_add_room');
+      await ctx.reply(
+        '<b>🩺 链路诊断</b>\n\n<blockquote>📭 当前还没有配置任何房间，添加房间后即可检测 API、Cookie 与源流线路。</blockquote>',
+        { parse_mode: 'HTML', reply_markup: emptyKb }
+      );
       return;
     }
     const kb = new InlineKeyboard();
@@ -180,11 +295,40 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
 
   bot.command('addroom', startAddRoom);
   bot.command('rooms', showRooms);
-  bot.command('snap', showQuickSnap);
+  bot.command('snap', (ctx) => showQuickSnap(ctx, false));
   bot.command('diagnose', showQuickDiagnose);
   bot.hears('➕ 添加房间', startAddRoom);
   bot.hears('🏠 房间管理', showRooms);
-  bot.hears('📷 快捷截图', showQuickSnap);
+  bot.hears('📷 快捷截图', (ctx) => showQuickSnap(ctx, false));
+
+  bot.callbackQuery('quick_add_room', async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    await startAddRoom(ctx);
+  });
+
+  bot.callbackQuery('quick_snap_live', async (ctx) => {
+    await showQuickSnap(ctx, true);
+  });
+
+  bot.callbackQuery(/^rooms_filter:(all|live|idle|paused)$/, async (ctx) => {
+    const filter = ctx.match[1];
+    const tasks = scheduler.getTrafficStats();
+    const filterToast = { all: '已显示全部房间', live: '仅显示推流中', idle: '仅显示待机', paused: '仅显示已暂停' };
+    await ctx.answerCallbackQuery(filterToast[filter] || '已刷新').catch(() => {});
+    await safeEditMessageText(ctx, views.renderRoomList(tasks, filter), {
+      parse_mode: 'HTML',
+      reply_markup: buildTaskListKeyboard(tasks, filter),
+    });
+  });
+
+  bot.callbackQuery('open_widget', async (ctx) => {
+    await ctx.answerCallbackQuery('🎛️ 正在打开实时卡片...').catch(() => {});
+    if (typeof sendWidgetToChat === 'function') {
+      await sendWidgetToChat(ctx);
+    } else {
+      await sendReply(ctx, '请发送 /widget 打开实时卡片');
+    }
+  });
 
   bot.callbackQuery(/^manage:(\d+)/, async (ctx) => {
     const taskId = ctx.match[1];
@@ -249,11 +393,17 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
   });
 
   bot.callbackQuery(/^screenshot:(\d+)/, async (ctx) => {
-    const task = db.getTaskById(ctx.match[1]);
+    const task = getHydratedTaskWithTraffic(ctx.match[1]);
     if (!task) { await ctx.answerCallbackQuery('任务已不存在'); return; }
 
     if (task.status !== 'ENABLED') {
       await ctx.answerCallbackQuery({ text: '❌ 任务未启用，无法截图', show_alert: true });
+      return;
+    }
+
+    const isStreaming = Boolean(task.traffic?.running || scheduler.isTaskStreaming?.(task));
+    if (!isStreaming) {
+      await ctx.answerCallbackQuery({ text: '⏸️ 该房间当前未在推流中，开播后即可抓帧', show_alert: true });
       return;
     }
 
@@ -263,14 +413,9 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
       return;
     }
 
-    await ctx.answerCallbackQuery({ text: '正在获取截图...' });
+    await ctx.answerCallbackQuery({ text: '📸 正在获取实时截图...' });
     try {
-      const imageBuffer = await manager.captureSnapshot();
-      await sendPhoto(
-        ctx,
-        new InputFile(imageBuffer, `screenshot_${task.room_id}.jpg`),
-        { caption: `📸 ${views.platformLabel(task.platform)} #${task.room_id} 截图\n${new Date().toLocaleString('zh-CN', { hour12: false })}` }
-      );
+      await captureAndSendSnapshot(ctx, task);
     } catch (error) {
       const msg = error.message || '未知错误';
       const userMessage = msg.includes('流不可用') ? '❌ 获取截图失败: 直播流不可用'
@@ -339,72 +484,80 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     }
   });
 
-  // 📈 24小时推流波浪曲线图（默认中午 12:00 → 次日中午 12:00，支持切换 00:00 → 24:00）
-  const sendRoomWaveChart = async (ctx, targetId = 'all', mode = 'noon') => {
-    const windowInfo = curveChart.get24HourWindow(mode);
+  // 📈 分房间分钟级深色高清推流曲线图（30分 / 1小时 / 3小时 / 6小时 / 12小时，兼容旧 24h 按钮）
+  const sendRoomWaveChart = async (ctx, targetId = 'all', mode = '1h', { editInPlace = false } = {}) => {
+    const windowInfo = curveChart.getCurveWindow(mode);
+    const allTasks = scheduler.getTrafficStats?.() || db.getAllTasks();
     let task = null;
     let samples = [];
+    let liveKbps = 0;
 
     if (targetId !== 'all') {
       task = getHydratedTaskWithTraffic(targetId);
       if (!task) {
-        if (ctx.callbackQuery) await ctx.answerCallbackQuery('任务已不存在');
+        if (ctx.callbackQuery) await ctx.answerCallbackQuery('任务已不存在').catch(() => {});
         else await ctx.reply('❌ 未找到指定房间');
         return;
       }
       samples = db.getBitrateSamples(task.id, windowInfo.startMs, windowInfo.endMs);
-      // 若当前正处于推流中，补充当前时刻实时采样点以确保波浪线即时显示
       if (task.traffic?.running && task.traffic?.bitrateKbps > 0) {
+        liveKbps = Math.round(task.traffic.bitrateKbps);
         const now = Date.now();
         if (now >= windowInfo.startMs && now <= windowInfo.endMs) {
-          samples = [...samples, { task_id: task.id, ts: now, kbps: Math.round(task.traffic.bitrateKbps) }];
+          samples = [...samples, { task_id: task.id, ts: now, kbps: liveKbps }];
         }
       }
     } else {
       samples = db.getAllBitrateSamples(windowInfo.startMs, windowInfo.endMs);
-      const allLive = scheduler.getTrafficStats?.() || [];
       const now = Date.now();
       if (now >= windowInfo.startMs && now <= windowInfo.endMs) {
-        for (const t of allLive) {
+        for (const t of allTasks) {
           if (t.traffic?.running && t.traffic?.bitrateKbps > 0) {
-            samples.push({ task_id: t.id, ts: now, kbps: Math.round(t.traffic.bitrateKbps) });
+            const k = Math.round(t.traffic.bitrateKbps);
+            liveKbps += k;
+            samples.push({ task_id: t.id, ts: now, kbps: k });
           }
         }
       }
     }
 
-    const { pngBuffer, sessions } = curveChart.renderWaveChartPng({
+    const chartTitle = task
+      ? `${curveChart.platformAsciiTag(task.platform)} #${task.room_id}`
+      : 'ALL ROOMS';
+    const chart = curveChart.renderWaveChartPng({
       samples,
       mode: windowInfo.mode,
+      title: chartTitle,
+      currentKbps: liveKbps > 0 ? liveKbps : null,
     });
     const unicodeWave = curveChart.renderUnicodeWave(samples, windowInfo.startMs, windowInfo.endMs);
     const caption = views.renderWaveChartCaption({
       task,
       windowInfo,
-      sessions,
+      sessions: chart.sessions,
       unicodeWave,
+      avgKbps: chart.avgKbps,
+      peakKbps: chart.peakKbps,
+      currentKbps: liveKbps,
     });
 
-    const kb = new InlineKeyboard()
-      .text(
-        windowInfo.mode === 'noon' ? '✅ 🕛 12:00→次日12:00' : '🕛 12:00→次日12:00',
-        `curve:${targetId}:noon`
-      )
-      .text(
-        windowInfo.mode === 'midnight' ? '✅ 🌅 00:00→24:00' : '🌅 00:00→24:00',
-        `curve:${targetId}:midnight`
-      )
-      .row();
+    const kb = buildCurveKeyboard(String(targetId), windowInfo.mode, allTasks);
+    const filename = `curve_${task ? task.room_id : 'all'}_${windowInfo.mode}.png`;
+    const photoOpts = {
+      caption,
+      parse_mode: 'HTML',
+      reply_markup: kb,
+      filename,
+    };
 
-    if (task) {
-      kb.text('⚙️ 返回房间控制台', `manage:${task.id}`);
-    } else {
-      kb.text('📊 返回推流状态总览', 'tstatus_back');
+    if (editInPlace && typeof safeEditMessageMedia === 'function') {
+      await safeEditMessageMedia(ctx, chart.pngBuffer, photoOpts);
+      return;
     }
 
     await sendPhoto(
       ctx,
-      new InputFile(pngBuffer, `wave_${targetId}_${windowInfo.mode}.png`),
+      new InputFile(chart.pngBuffer, filename),
       {
         caption,
         parse_mode: 'HTML',
@@ -413,111 +566,93 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     );
   };
 
+  const showCurveEntry = async (ctx, { isCallback = false, forcePicker = false } = {}) => {
+    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
+    if (tasks.length === 0) {
+      const emptyKb = new InlineKeyboard().text('➕ 立即添加房间', 'quick_add_room');
+      const html = views.renderCurveRoomPicker([]);
+      if (isCallback) {
+        await safeEditMessageText(ctx, html, { parse_mode: 'HTML', reply_markup: emptyKb });
+      } else {
+        await ctx.reply(html, { parse_mode: 'HTML', reply_markup: emptyKb });
+      }
+      return;
+    }
+
+    // 只有 1 个房间时，直接渲染该房间的 1 小时曲线
+    if (tasks.length === 1) {
+      await sendRoomWaveChart(ctx, String(tasks[0].id), '1h', { editInPlace: false });
+      return;
+    }
+
+    // 非强制选房时，若当前有正在推流的房间，优先直达首个推流中房间的 1 小时曲线（下方自带切房按钮）
+    if (!forcePicker) {
+      const streaming = selectStreamingTasks(tasks, scheduler);
+      if (streaming.length > 0) {
+        await sendRoomWaveChart(ctx, String(streaming[0].id), '1h', { editInPlace: false });
+        return;
+      }
+    }
+
+    // 多房间选择器卡片
+    const sorted = views.sortTasksByActivity ? views.sortTasksByActivity(tasks) : tasks;
+    const kb = new InlineKeyboard();
+    sorted.forEach((t) => {
+      const running = t.status === 'ENABLED' && Boolean(t.traffic?.running);
+      const icon = t.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
+      const host = t.traffic?.roomInfo?.hostName ? ` (${t.traffic.roomInfo.hostName})` : '';
+      const kbps = Math.round(t.traffic?.bitrateKbps || 0);
+      const rateTag = running && kbps > 0 ? ` · ${kbps}k` : '';
+      kb.text(`${icon} ${views.platformLabel(t.platform)} #${t.room_id}${host}${rateTag}`, `curve:${t.id}:1h`).row();
+    });
+    kb.text('🏠 返回房间管理', 'back_list');
+
+    const html = views.renderCurveRoomPicker(sorted);
+    if (isCallback) {
+      await safeEditMessageText(ctx, html, { parse_mode: 'HTML', reply_markup: kb });
+    } else {
+      await ctx.reply(html, { parse_mode: 'HTML', reply_markup: kb });
+    }
+  };
+
   bot.command('curve', async (ctx) => {
     const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/curve\s*/i, '').trim();
     if (raw && isNumericRoomId(raw)) {
       const found = db.getAllTasks().find((t) => String(t.room_id) === raw);
       if (found) {
-        await sendRoomWaveChart(ctx, String(found.id), 'noon');
+        await sendRoomWaveChart(ctx, String(found.id), '1h', { editInPlace: false });
         return;
       }
+      await ctx.reply(`❌ 未找到房间 <code>#${views.escapeHtml(raw)}</code>`, { parse_mode: 'HTML' });
+      return;
     }
-    await sendRoomWaveChart(ctx, 'all', 'noon');
+    await showCurveEntry(ctx, { isCallback: false, forcePicker: false });
   });
 
   bot.hears('📈 推流曲线', async (ctx) => {
-    await sendRoomWaveChart(ctx, 'all', 'noon');
+    await showCurveEntry(ctx, { isCallback: false, forcePicker: false });
   });
 
-  const showSnapSelector = async (ctx) => {
-    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/snap\s*/i, '').trim();
-    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
-    if (raw && isNumericRoomId(raw)) {
-      const found = tasks.find((t) => String(t.room_id) === raw);
-      if (found) {
-        const manager = scheduler.getTaskManager(found);
-        if (!manager || found.status !== 'ENABLED') {
-          await sendReply(ctx, `❌ ${views.platformLabel(found.platform)} #${found.room_id} 未启用或未运行，无法截图`);
-          return;
-        }
-        try {
-          const imageBuffer = await manager.captureSnapshot();
-          await sendPhoto(
-            ctx,
-            new InputFile(imageBuffer, `screenshot_${found.room_id}.jpg`),
-            { caption: `📸 ${views.platformLabel(found.platform)} #${found.room_id} 截图\n${new Date().toLocaleString('zh-CN', { hour12: false })}` }
-          );
-        } catch (error) {
-          await sendReply(ctx, `❌ 获取截图失败: ${error.message || '未知错误'}`);
-        }
-        return;
-      }
-    }
+  bot.callbackQuery('open_curve_menu', async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    await showCurveEntry(ctx, { isCallback: true, forcePicker: true });
+  });
 
-    const enabled = tasks.filter((t) => t.status === 'ENABLED');
-    if (enabled.length === 0) {
-      await sendReply(ctx, '📷 当前没有启用中的直播房间，无法截图。');
-      return;
-    }
-    const kb = new InlineKeyboard();
-    enabled.forEach((task) => {
-      const running = task.traffic?.running;
-      const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
-      kb.text(`${running ? '🟢' : '⚪'} ${views.platformLabel(task.platform)} #${task.room_id}${host}`, `screenshot:${task.id}`).row();
-    });
-    await sendReply(ctx, '📷 <b>快捷截图</b>\n点击要截取实时画面的房间（也可直接发 <code>/snap 房间号</code>）：', {
-      parse_mode: 'HTML',
-      reply_markup: kb,
-    });
-  };
-
-  bot.command('snap', showSnapSelector);
-  bot.hears('📷 快捷截图', showSnapSelector);
-
-  const showDiagnoseSelector = async (ctx) => {
-    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/diagnose\s*/i, '').trim();
-    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
-    if (raw && isNumericRoomId(raw)) {
-      const found = tasks.find((t) => String(t.room_id) === raw);
-      if (found) {
-        await sendReply(ctx, `🔍 正在诊断 ${views.platformLabel(found.platform)} #${found.room_id}，请稍候...`);
-        try {
-          const report = await diagnoseTask(found);
-          const kb = new InlineKeyboard()
-            .text('🔄 重新诊断', `diagnose:${found.id}`)
-            .text('⚙️ 返回控制台', `manage:${found.id}`);
-          await sendReply(ctx, views.renderDiagnoseReport(found, report), { parse_mode: 'HTML', reply_markup: kb });
-        } catch (err) {
-          await sendReply(ctx, `❌ 诊断失败：${err.message}`);
-        }
-        return;
-      }
-    }
-
-    if (tasks.length === 0) {
-      await sendReply(ctx, '🔍 当前没有配置任何房间。');
-      return;
-    }
-    const kb = new InlineKeyboard();
-    tasks.forEach((task) => {
-      const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
-      kb.text(`🔍 ${views.platformLabel(task.platform)} #${task.room_id}${host}`, `diagnose:${task.id}`).row();
-    });
-    await sendReply(ctx, '🔍 <b>链路诊断</b>\n选择要诊断拉流与编码链路的房间（或发 <code>/diagnose 房间号</code>）：', {
-      parse_mode: 'HTML',
-      reply_markup: kb,
-    });
-  };
-
-  bot.command('diagnose', showDiagnoseSelector);
-
-  bot.callbackQuery(/^curve:(\d+|all):(noon|midnight)$/, async (ctx) => {
+  bot.callbackQuery(/^curve:(\d+|all):(30m|1h|3h|6h|12h|noon|midnight)$/, async (ctx) => {
     const [, targetId, mode] = ctx.match;
-    await ctx.answerCallbackQuery(
-      mode === 'noon' ? '📈 生成 12:00→次日12:00 波浪曲线...' : '📈 生成 00:00→24:00 波浪曲线...'
-    );
+    const labelMap = {
+      '30m': '近 30 分钟',
+      '1h': '近 1 小时',
+      '3h': '近 3 小时',
+      '6h': '近 6 小时',
+      '12h': '近 12 小时',
+      noon: '12:00→次日12:00',
+      midnight: '00:00→24:00',
+    };
+    await ctx.answerCallbackQuery(`📈 加载 ${labelMap[mode] || mode} 码率曲线...`).catch(() => {});
+    const fromPhoto = Boolean(ctx.callbackQuery?.message?.photo);
     try {
-      await sendRoomWaveChart(ctx, targetId, mode);
+      await sendRoomWaveChart(ctx, targetId, mode, { editInPlace: fromPhoto });
     } catch (err) {
       await sendReply(ctx, `❌ 生成推流曲线失败：${err.message}`);
     }
@@ -540,7 +675,7 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
   bot.callbackQuery(/^del:(\d+)/, async (ctx) => {
     const task = db.getTaskById(ctx.match[1]);
     if (task) {
-      scheduler.stopManager?.(task);
+      await scheduler.stopManager?.(task);
     }
     db.deleteTask(ctx.match[1]);
     await scheduler.tick?.();
@@ -551,7 +686,7 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
       `🗑️ 已删除房间任务\n\n${views.renderRoomList(tasks)}`,
       {
         parse_mode: 'HTML',
-        reply_markup: tasks.length ? buildTaskListKeyboard(tasks) : undefined,
+        reply_markup: buildTaskListKeyboard(tasks),
       }
     );
   });
@@ -623,7 +758,7 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     const tasks = scheduler.getTrafficStats();
     await safeEditMessageText(ctx, views.renderRoomList(tasks), {
       parse_mode: 'HTML',
-      reply_markup: tasks.length ? buildTaskListKeyboard(tasks) : undefined,
+      reply_markup: buildTaskListKeyboard(tasks),
     });
   });
 
@@ -773,7 +908,7 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
       const task = db.getTaskById(editRoomState.taskId);
       if (!task) { await ctx.reply('❌ 任务已不存在'); ctx.session.editRoom = null; return; }
       try {
-        scheduler.stopManager?.(task);
+        await scheduler.stopManager?.(task);
         db.updateRoomId(editRoomState.taskId, text);
         const latestTask = db.getTaskById(editRoomState.taskId);
         await scheduler.refreshTask?.(latestTask || task);
@@ -817,7 +952,8 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
           if (info) {
             const liveTag = info.isLive ? '🟢 正在直播' : '⚪ 当前未开播';
             const hostPart = info.hostName ? `主播：<b>${views.escapeHtml(info.hostName)}</b>\n` : '';
-            const titlePart = info.title ? `标题：${views.escapeHtml(info.title)}\n` : '';
+            const roomTitle = info.roomName || info.title || '';
+            const titlePart = roomTitle ? `标题：${views.escapeHtml(roomTitle)}\n` : '';
             infoLine = `\n${hostPart}${titlePart}状态：${liveTag}\n`;
           }
         } catch {}
@@ -840,4 +976,10 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
   });
 }
 
-module.exports = { register, saveRoomTask, getHydratedTaskWithTraffic };
+module.exports = {
+  register,
+  saveRoomTask,
+  getHydratedTaskWithTraffic,
+  selectStreamingTasks,
+  buildCurveKeyboard,
+};

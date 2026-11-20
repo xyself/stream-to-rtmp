@@ -16,8 +16,10 @@ const fallbackImage = require('../services/fallback-image');
 const housekeeping = require('../core/housekeeping');
 const runtimeEnv = require('../core/runtime-env');
 const updater = require('../services/updater');
+const curveChart = require('../core/curve-chart');
 const {
   safeEditMessageText,
+  safeEditMessageMedia,
   sendEphemeralMessage,
   sendEphemeralPhoto,
 } = require('./ephemeral');
@@ -101,7 +103,7 @@ function buildDashboardKeyboard() {
     .text(`🔄 每日维护: ${nightlyOn ? `✅ ${hour}点` : '⛔ 关'}`, 'global_toggle_nightly')
     .text(`⏰ 维护时间: ${hour}:00`, 'global_set_restart_hour')
     .row()
-    .text('📈 24h推流曲线', 'curve:all:noon')
+    .text('📈 推流曲线', 'open_curve_menu')
     .text('📜 查日志', 'global_view_logs')
     .text('🛠️ FFmpeg 参数', 'global_ffmpeg_params')
     .row()
@@ -117,22 +119,60 @@ function buildDashboardKeyboard() {
   return keyboard;
 }
 
-function buildTaskListKeyboard(tasks) {
+function buildTaskListKeyboard(tasks = [], filter = 'all') {
   const keyboard = new InlineKeyboard();
-  tasks.forEach((task) => {
+  if (!tasks || tasks.length === 0) {
+    keyboard
+      .text('➕ 立即添加房间', 'quick_add_room')
+      .text('🔄 刷新', 'back_list');
+    return keyboard;
+  }
+
+  const activeFilter = ['all', 'live', 'idle', 'paused'].includes(filter) ? filter : 'all';
+  const liveCount = tasks.filter((t) => t.status === 'ENABLED' && Boolean(t.traffic?.running)).length;
+  const idleCount = tasks.filter((t) => t.status === 'ENABLED' && !t.traffic?.running).length;
+  const pausedCount = tasks.filter((t) => t.status !== 'ENABLED').length;
+
+  keyboard
+    .text(`${activeFilter === 'all' ? '✓' : ''}全部(${tasks.length})`, 'rooms_filter:all')
+    .text(`${activeFilter === 'live' ? '✓' : ''}🟢${liveCount}`, 'rooms_filter:live')
+    .text(`${activeFilter === 'idle' ? '✓' : ''}⚪${idleCount}`, 'rooms_filter:idle')
+    .text(`${activeFilter === 'paused' ? '✓' : ''}🛑${pausedCount}`, 'rooms_filter:paused')
+    .row();
+
+  const filtered = views.filterTasksByState ? views.filterTasksByState(tasks, activeFilter) : tasks;
+  const sorted = views.sortTasksByActivity ? views.sortTasksByActivity(filtered) : filtered;
+  sorted.forEach((task) => {
     const running = task.traffic?.running;
-    const icon = task.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '✅';
+    const icon = task.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
     const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
+    const kbps = Math.round(task.traffic?.bitrateKbps || 0);
+    const rateTag = running && kbps > 0 ? ` · ${kbps}k` : '';
     const cookieBadge = task.cookie ? ' 🍪' : '';
-    keyboard.text(`${icon} ${views.platformLabel(task.platform)} #${task.room_id}${host}${cookieBadge}`, `manage:${task.id}`).row();
+    keyboard.text(`${icon} ${views.platformLabel(task.platform)} #${task.room_id}${host}${rateTag}${cookieBadge}`, `manage:${task.id}`).row();
   });
+
+  keyboard
+    .text('➕ 添加房间', 'quick_add_room')
+    .text('📷 截推流画面', 'quick_snap_live')
+    .row()
+    .text('🎛️ 实时卡片', 'open_widget')
+    .text('🔄 刷新', `rooms_filter:${activeFilter}`);
   return keyboard;
 }
 
 // 📊 推流状态：先列房间，点进去看详情
-function buildStatusListKeyboard(entries) {
+function buildStatusListKeyboard(entries = []) {
   const keyboard = new InlineKeyboard();
-  entries.forEach((entry) => {
+  if (!entries || entries.length === 0) {
+    keyboard
+      .text('➕ 立即添加房间', 'quick_add_room')
+      .text('🔄 刷新总览', 'tstatus_back');
+    return keyboard;
+  }
+
+  const sorted = views.sortTasksByActivity ? views.sortTasksByActivity(entries) : entries;
+  sorted.forEach((entry) => {
     const running = entry.traffic?.running;
     const icon = entry.status !== 'ENABLED' ? '🛑' : running ? '🟢' : '⚪';
     const kbps = Math.round(entry.traffic?.bitrateKbps || 0);
@@ -141,8 +181,9 @@ function buildStatusListKeyboard(entries) {
     keyboard.text(`${icon} ${views.platformLabel(entry.platform)} #${entry.room_id}${host}${extra}`, `tstatus:${entry.id}`).row();
   });
   keyboard
-    .text('📈 24h推流曲线 (12:00→12:00)', 'curve:all:noon')
-    .text('🔄 刷新总览', 'tstatus_back');
+    .text('📷 截推流画面', 'quick_snap_live')
+    .text('📈 推流曲线', 'open_curve_menu')
+    .text('🔄 刷新', 'tstatus_back');
   return keyboard;
 }
 
@@ -168,7 +209,7 @@ function buildTaskDetailKeyboard(task) {
       .row();
   }
   keyboard
-    .text('📈 24h曲线', `curve:${task.id}:noon`)
+    .text('📈 推流曲线', `curve:${task.id}:1h`)
     .text('🩺 诊断测试', `diagnose:${task.id}`)
     .text(`🎬 编码:${modeShort}`, `transcode_mode:${task.id}`)
     .row()
@@ -285,6 +326,53 @@ function getRecentErrors() {
     .map((t) => `[${views.platformLabel(t.platform)} #${t.room_id}] ${t.last_error}`);
 }
 
+/**
+ * 安全构建 Telegram HTML 日志块：先按字符预算逐行装填再闭合 <code>，
+ * 绝不在 HTML 转义后做裸 slice，防止把 &amp;/&lt;/&gt; 切碎导致 400 can't parse entities。
+ */
+function formatLogsHtml(lines = [], { onlyErrors = false, maxLen = 4000 } = {}) {
+  const safeLines = Array.isArray(lines) ? lines : [];
+  const header = `<b>📜 日志</b>（最近 ${safeLines.length} 行${onlyErrors ? ' · 只看报错' : ''}）\n`;
+  if (safeLines.length === 0) {
+    return `${header}<code>(没有符合条件的日志)</code>`;
+  }
+
+  const wrapperLen = header.length + '<code>'.length + '</code>'.length;
+  const budget = Math.max(64, maxLen - wrapperLen);
+  const kept = [];
+  let used = 0;
+
+  // 从最新日志往前装填，确保超出预算时优先保留最近日志且不截断实体
+  for (let i = safeLines.length - 1; i >= 0; i -= 1) {
+    const raw = String(safeLines[i] ?? '');
+    const clippedRaw = raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
+    let escaped = views.escapeHtml(clippedRaw);
+    const sep = kept.length > 0 ? 1 : 0;
+
+    if (used + sep + escaped.length <= budget) {
+      kept.push(escaped);
+      used += sep + escaped.length;
+    } else if (kept.length === 0) {
+      // 单条日志就超预算：按原始字符二分缩短后再转义，避免切碎 HTML 实体
+      let lo = 0;
+      let hi = clippedRaw.length;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        const candidate = `${views.escapeHtml(clippedRaw.slice(0, mid))}…`;
+        if (candidate.length <= budget) lo = mid;
+        else hi = mid - 1;
+      }
+      kept.push(`${views.escapeHtml(clippedRaw.slice(0, lo))}…`);
+      break;
+    } else {
+      break;
+    }
+  }
+
+  kept.reverse();
+  return `${header}<code>${kept.join('\n')}</code>`;
+}
+
 function getNotificationSettings() {
   const settings = {};
   for (const item of views.NOTIFICATION_TYPES) {
@@ -319,7 +407,7 @@ async function registerBotCommands(bot) {
   const commands = [
     { command: 'start',    description: '🚀 打开控制中心与底部键盘' },
     { command: 'status',   description: '📊 推流状态 & 房间详情' },
-    { command: 'curve',    description: '📈 24小时推流码率波浪曲线图' },
+    { command: 'curve',    description: '📈 分房间分钟级推流码率曲线图' },
     { command: 'traffic',  description: '📡 实时流量 & 码率统计' },
     { command: 'widget',   description: '🎛️ 实时监控 Widget（Bot API 10.4）' },
     { command: 'rooms',    description: '🏠 房间列表管理（Cookie/编码/线路）' },
@@ -372,10 +460,56 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   const ephemeralReply = (ctx, text, options = {}) => sendEphemeralMessage(bot, ctx, text, options);
   const ephemeralPhoto = (ctx, photo, options = {}) => sendEphemeralPhoto(bot, ctx, photo, options);
 
+  const sendWidgetToChat = async (ctx) => {
+    const system = getSystemInfo();
+    const tasks = scheduler.getTrafficStats();
+    const chatData = widgetHelper.buildChatData({ tasks, system });
+    const caption = widgetHelper.buildCaption({ tasks, system });
+    const fallbackDashboard = () => views.renderDashboard({
+      system,
+      stats: scheduler.getStats(),
+      recentErrors: getRecentErrors(),
+    });
+
+    if (ctx.chat?.type && ctx.chat.type !== 'private') {
+      await ctx.reply(
+        '⚠️ Telegram Bot API 10.4 目前仅支持在机器人私聊中使用实时卡片 Widget（群组/频道暂不支持）\n\n' +
+        fallbackDashboard(),
+        { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
+      );
+      return;
+    }
+
+    try {
+      const sent = await widgetHelper.sendWidget(bot, ctx.chat.id, chatData, { caption });
+      const msgId = sent?.message_id ?? sent?.result?.message_id;
+      if (msgId) {
+        bot._widgetMessages = bot._widgetMessages || {};
+        bot._widgetMessages[String(ctx.chat.id)] = msgId;
+      }
+    } catch (err) {
+      const errMsg = err?.description || err?.message || '未知错误';
+      console.error('[widget] sendWidget 失败:', errMsg);
+      const isNotAllowed = /INPUT_MEDIA_WIDGET_NOT_ALLOWED/i.test(errMsg);
+      const isMethodMissing = /unknown method|method not found|not supported|404/i.test(errMsg);
+      const header = isNotAllowed
+        ? `⚠️ Telegram 正式环境暂未对当前 Bot 开放 Widget 权限（<code>${views.escapeHtml(errMsg)}</code>），需等待官方分批放行，或使用 Telegram Test Server（<code>TG_API_ENV=test</code>）测试`
+        : isMethodMissing
+          ? `⚠️ 当前 Bot API 环境或客户端不支持 Widget（${views.escapeHtml(errMsg)}）`
+          : `❌ Widget 发送失败：<code>${views.escapeHtml(errMsg)}</code>`;
+      await ctx.reply(
+        `${header}\n\n${views.renderRoomList(tasks)}`,
+        { parse_mode: 'HTML', reply_markup: buildTaskListKeyboard(tasks) }
+      );
+    }
+  };
+
   const sharedDeps = {
     safeEditMessageText,
+    safeEditMessageMedia,
     ephemeralReply,
     ephemeralPhoto,
+    sendWidgetToChat,
     buildTaskDetailKeyboard,
     buildTaskListKeyboard,
     buildDashboardKeyboard,
@@ -407,17 +541,13 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   const showLogs = async (ctx, edit = false) => {
     const onlyErrors = ctx.session.logFilter === 'errors';
     const lines = logger.queryLines({ onlyErrors, limit: 20 });
-    const body = lines.length
-      ? lines.map((l) => views.escapeHtml(l.length > 300 ? l.slice(0, 300) + '…' : l)).join('\n')
-      : '(没有符合条件的日志)';
-    let text = `<b>📜 日志</b>（最近 ${lines.length} 行${onlyErrors ? ' · 只看报错' : ''}）\n<code>${body}</code>`;
-    if (text.length > 4000) text = text.slice(0, 4000) + '…</code>';
+    const text = formatLogsHtml(lines, { onlyErrors });
     const kb = new InlineKeyboard()
       .text('🔄 刷新', 'log_refresh')
       .text(onlyErrors ? '📜 看全部' : '⚠️ 只看报错', 'log_filter').row()
       .text('⬅️ 返回面板', 'log_back');
     const opts = { parse_mode: 'HTML', reply_markup: kb };
-    if (edit) {
+    if (edit === true) {
       await safeEditMessageText(ctx, text, opts);
     } else {
       await ephemeralReply(ctx, text, opts);
@@ -431,22 +561,18 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   const showStatus = async (ctx, edit = false) => {
     try {
       await Promise.race([
-        scheduler.refreshAllRoomInfo(),
-        new Promise((resolve) => setTimeout(resolve, 3000)),
+        Promise.resolve(scheduler.refreshAllRoomInfo?.()).catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
     } catch {}
 
     const stats = scheduler.getTrafficStats();
-    if (stats.length === 0) {
-      return await ctx.reply('当前还没有配置房间，点击「➕ 添加房间」开始创建。');
-    }
-
     const text = views.renderStatusList(stats);
     const opts = {
       parse_mode: 'HTML',
       reply_markup: buildStatusListKeyboard(stats),
     };
-    if (edit) {
+    if (edit === true) {
       await safeEditMessageText(ctx, text, opts);
     } else {
       await ctx.reply(text, opts);
@@ -508,57 +634,14 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.reply('🚀 直播转播控制中心', { reply_markup: mainKeyboard });
   });
   bot.command('panel', showDashboard);
-  bot.command('status', showStatus);
+  bot.command('status', async (ctx) => { await showStatus(ctx, false); });
   bot.command('notify', showNotificationSettings);
   bot.command('traffic', showTraffic);
   bot.command('logs', async (ctx) => { await showLogs(ctx); });
 
   // ─── Bot API 10.4 Widget ───────────────────────────────────────────────────
-  // /widget 命令：发送 Widget；仅在真正不支持或报错时降级到普通面板并展示真实错误原因
-  bot.command('widget', async (ctx) => {
-    const system = getSystemInfo();
-    const tasks = scheduler.getTrafficStats();
-    const chatData = widgetHelper.buildChatData({ tasks, system });
-    const caption = widgetHelper.buildCaption({ tasks, system });
-    const fallbackDashboard = () => views.renderDashboard({
-      system,
-      stats: scheduler.getStats(),
-      recentErrors: getRecentErrors(),
-    });
-
-    if (ctx.chat?.type && ctx.chat.type !== 'private') {
-      await ctx.reply(
-        '⚠️ Telegram Bot API 10.4 目前仅支持在机器人私聊中使用 Widget（群组/频道暂不支持）\n\n' +
-        fallbackDashboard(),
-        { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
-      );
-      return;
-    }
-
-    try {
-      const sent = await widgetHelper.sendWidget(bot, ctx.chat.id, chatData, { caption });
-      // 记录 message_id，供定时推送 editMessageWidgetData
-      const msgId = sent?.message_id ?? sent?.result?.message_id;
-      if (msgId) {
-        bot._widgetMessages = bot._widgetMessages || {};
-        bot._widgetMessages[String(ctx.chat.id)] = msgId;
-      }
-    } catch (err) {
-      const errMsg = err?.description || err?.message || '未知错误';
-      console.error('[widget] sendWidget 失败:', errMsg);
-      const isNotAllowed = /INPUT_MEDIA_WIDGET_NOT_ALLOWED/i.test(errMsg);
-      const isMethodMissing = /unknown method|method not found|not supported|404/i.test(errMsg);
-      const header = isNotAllowed
-        ? `⚠️ Telegram 正式环境暂未对当前 Bot 开放 Widget 权限（<code>${views.escapeHtml(errMsg)}</code>），需等待官方分批放行，或使用 Telegram Test Server（<code>TG_API_ENV=test</code>）测试`
-        : isMethodMissing
-          ? `⚠️ 当前 Bot API 环境或客户端不支持 Widget（${views.escapeHtml(errMsg)}）`
-          : `❌ Widget 发送失败：<code>${views.escapeHtml(errMsg)}</code>`;
-      await ctx.reply(
-        `${header}\n\n${fallbackDashboard()}`,
-        { parse_mode: 'HTML', reply_markup: buildDashboardKeyboard() }
-      );
-    }
-  });
+  // /widget 命令：发送 Widget；仅在真正不支持或报错时降级到原生房间卡片并展示真实错误原因
+  bot.command('widget', sendWidgetToChat);
 
   // widget_query：用户在 Widget 里点了按钮
   // grammy 1.42 类型白名单不含 widget_query，ctx.chat 为 undefined，需从 query.chat / query.from 提取
@@ -600,6 +683,60 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       ).catch(() => {});
       // 推送更新后的 chat_data
       await _pushWidgetUpdate(chatId, messageId).catch(() => {});
+    } else if (action === 'cur') {
+      // 生成该房间的 1 小时深色高清推流曲线图
+      const hydrated = taskId ? roomHandlers.getHydratedTaskWithTraffic(String(taskId)) : null;
+      if (!hydrated) {
+        await widgetHelper.answerWidgetQuery(bot, queryId, '房间不存在').catch(() => {});
+        return;
+      }
+      await widgetHelper.answerWidgetQuery(bot, queryId, '📈 正在生成 1小时 推流曲线...').catch(() => {});
+      if (chatId) {
+        try {
+          const windowInfo = curveChart.getCurveWindow('1h');
+          let samples = db.getBitrateSamples(hydrated.id, windowInfo.startMs, windowInfo.endMs);
+          const liveKbps = hydrated.traffic?.running && hydrated.traffic?.bitrateKbps > 0
+            ? Math.round(hydrated.traffic.bitrateKbps)
+            : 0;
+          if (liveKbps > 0) {
+            const now = Date.now();
+            if (now >= windowInfo.startMs && now <= windowInfo.endMs) {
+              samples = [...samples, { task_id: hydrated.id, ts: now, kbps: liveKbps }];
+            }
+          }
+          const chart = curveChart.renderWaveChartPng({
+            samples,
+            mode: windowInfo.mode,
+            title: `${curveChart.platformAsciiTag(hydrated.platform)} #${hydrated.room_id}`,
+            currentKbps: liveKbps || null,
+          });
+          const unicodeWave = curveChart.renderUnicodeWave(samples, windowInfo.startMs, windowInfo.endMs);
+          const caption = views.renderWaveChartCaption({
+            task: hydrated,
+            windowInfo,
+            sessions: chart.sessions,
+            unicodeWave,
+            avgKbps: chart.avgKbps,
+            peakKbps: chart.peakKbps,
+            currentKbps: liveKbps,
+          });
+          const allTasks = scheduler.getTrafficStats?.() || db.getAllTasks();
+          const kb = roomHandlers.buildCurveKeyboard(String(hydrated.id), windowInfo.mode, allTasks);
+          await ephemeralPhoto(
+            null,
+            new InputFile(chart.pngBuffer, `curve_${hydrated.room_id}_1h.png`),
+            {
+              chatId,
+              receiverUserId: query.from?.id,
+              caption,
+              parse_mode: 'HTML',
+              reply_markup: kb,
+            }
+          );
+        } catch (err) {
+          await bot.api.sendMessage(chatId, `❌ 生成曲线失败: ${err.message}`).catch(() => {});
+        }
+      }
     } else if (action === 'snap') {
       // 截图
       const task = taskId ? db.getTaskById(String(taskId)) : null;
@@ -608,7 +745,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
         return;
       }
       const manager = scheduler.getTaskManager?.(task);
-      if (!manager) {
+      if (!manager || !manager.getTrafficStats?.().running) {
         await widgetHelper.answerWidgetQuery(bot, queryId, '当前未推流，无法截图').catch(() => {});
         return;
       }
@@ -662,7 +799,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   const showFallbackPanel = async (ctx, edit = false) => {
     const { text, kb } = renderFallbackPanel();
     const opts = { parse_mode: 'HTML', reply_markup: kb };
-    if (edit) {
+    if (edit === true) {
       await safeEditMessageText(ctx, text, opts);
     } else {
       await ctx.reply(text, opts);
@@ -670,17 +807,19 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   const showSystemStatus = async (ctx) => {
-    const sys = getSystemInfo({ forceRefreshFfmpeg: true });
+    const sys = getSystemInfo();
     const stats = scheduler.getStats();
+    const diskText = sys.disk ? `${sys.disk.used} / ${sys.disk.total} (${sys.disk.pct}%)` : '暂不可用';
     const text =
       `🖥️ <b>服务器与运行环境状态</b>\n\n` +
       `• 运行模式：<code>${views.escapeHtml(sys.runtimeLabel || 'Standard')}</code>\n` +
-      `• 系统 CPU：<b>${sys.cpuPct ?? 0}%</b>（${sys.cpuCores || 1} 核）\n` +
-      `• 内存占用：<b>${views.escapeHtml(sys.memDisplay || `${sys.memUsedMb}/${sys.memTotalMb} MB`)}</b>\n` +
-      `• 磁盘占用：<b>${views.escapeHtml(sys.diskDisplay || `${sys.diskPct ?? 0}%`)}</b>\n` +
+      `• 系统 CPU：<b>${sys.cpuPercent ?? 0}%</b>（${os.cpus().length || 1} 核）\n` +
+      `• 内存占用：<b>${views.escapeHtml(`${sys.memUsed} / ${sys.memTotal} (${sys.memPct ?? 0}%)`)}</b>\n` +
+      `• 磁盘占用：<b>${views.escapeHtml(diskText)}</b>\n` +
       `• 运行时长：<b>${views.escapeHtml(sys.uptime || '-')}</b>\n` +
+      `• 代码版本：<code>${views.escapeHtml(sys.gitSha || '未知')}</code>\n` +
       `• FFmpeg：<code>${views.escapeHtml(sys.ffmpegVersion || 'unknown')}</code>\n` +
-      `• 活跃推流：<b>${stats.running || 0}</b> / ${stats.total || 0} 房间`;
+      `• 活跃推流：<b>${stats.activeStreams || 0}</b> / ${stats.totalTasks || 0} 房间`;
     await ephemeralReply(ctx, text, { parse_mode: 'HTML' });
   };
 
@@ -730,7 +869,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   };
 
   bot.hears('📺 管理面板', showDashboard);
-  bot.hears('📊 推流状态', showStatus);
+  bot.hears('📊 推流状态', async (ctx) => { await showStatus(ctx, false); });
   bot.hears('🛠️ FFmpeg 参数', showFfmpegParams);
   bot.hears('🔔 通知管理', showNotificationSettings);
   bot.hears('📜 实时日志', async (ctx) => { await showLogs(ctx); });
@@ -747,13 +886,17 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ctx.reply('❎ 已取消当前输入操作并重置会话。', { reply_markup: mainKeyboard });
   });
   bot.command('startall', async (ctx) => {
-    db.updateAllTasksStatus('ENABLED');
-    await scheduler.tick();
+    db.enableAllTasks();
+    if (scheduler._stopped) {
+      scheduler.start();
+    } else {
+      await scheduler.tick();
+    }
     await ctx.reply('▶️ 已一键开启全部房间监控与推流任务。', { reply_markup: mainKeyboard });
   });
   bot.command('stopall', async (ctx) => {
-    db.updateAllTasksStatus('DISABLED');
-    await scheduler.stopAll();
+    db.disableAllTasks();
+    await scheduler.tick();
     await ctx.reply('🛑 已一键暂停全部房间推流任务。', { reply_markup: mainKeyboard });
   });
   bot.command('restart', async (ctx) => {
@@ -780,7 +923,8 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await showSystemStatus(ctx);
   });
   bot.callbackQuery('settings_widget', async (ctx) => {
-    await ctx.answerCallbackQuery('请发送 /widget 打开实时监控 Widget');
+    await ctx.answerCallbackQuery('正在打开实时面板...');
+    await sendWidgetToChat(ctx);
   });
 
   bot.callbackQuery('global_toggle_fallback', async (ctx) => {
@@ -893,7 +1037,10 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     const task = db.getTaskById(ctx.match[1]);
     if (!task) { await ctx.answerCallbackQuery('任务不存在'); return; }
     const manager = scheduler.getTaskManager?.(task);
-    if (!manager) { await ctx.answerCallbackQuery({ text: '任务当前没在推流，截不到画面', show_alert: true }); return; }
+    if (!manager || !manager.getTrafficStats?.().running) {
+      await ctx.answerCallbackQuery({ text: '任务当前没在推流，截不到画面', show_alert: true });
+      return;
+    }
     await ctx.answerCallbackQuery('正在截图…');
     try {
       const imageBuffer = await manager.captureSnapshot();
@@ -1304,8 +1451,9 @@ function createRelayBot(token = process.env.TG_TOKEN) {
       return;
     }
 
+    const modeTag = '免 Git 压缩包模式';
     if (!res.hasUpdate) {
-      const tip = `✅ <b>当前已是最新版本！</b>\n\nCommit: <code>${views.escapeHtml(res.localSha)}</code>\n暂无可用更新。`;
+      const tip = `✅ <b>当前已是最新版本！</b>\n\n版本：<code>${views.escapeHtml(res.localSha)}</code>（${modeTag}）\n暂无可用更新。`;
       if (isCallback) {
         await ephemeralReply(ctx, tip, { parse_mode: 'HTML' });
       } else {
@@ -1315,7 +1463,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     }
 
     const lines = [
-      `🚀 <b>发现新版本！</b>`,
+      `🚀 <b>发现新版本！</b>（${modeTag}）`,
       '',
       `📌 当前版本：<code>${views.escapeHtml(res.localSha)}</code>`,
       `🌟 最新版本：<code>${views.escapeHtml(res.remoteSha)}</code>（落后 ${res.commitsBehind} 个提交）`,
@@ -1541,5 +1689,6 @@ module.exports.buildAlertKeyboard = buildAlertKeyboard;
 module.exports.registerBotCommands = registerBotCommands;
 module.exports.saveRoomTask = roomHandlers.saveRoomTask;
 module.exports.setShutdownHandler = setShutdownHandler;
+module.exports.formatLogsHtml = formatLogsHtml;
 
 

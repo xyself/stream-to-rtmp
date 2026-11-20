@@ -339,27 +339,46 @@ class FFmpegService {
       const args = [...preInput, '-i', streamUrl, ...outputOpts, '-'];
       const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
       const proc = spawn(ffmpegPath, args);
+      const stderrChunks = [];
+      let stderrBytes = 0;
+      let settled = false;
+
+      const finish = (err, buf) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        if (err) reject(err);
+        else resolve(buf);
+      };
 
       const timeoutHandle = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`截图超时 (${timeout}ms)`));
+        try { proc.kill('SIGKILL'); } catch {}
+        finish(new Error(`截图超时 (${timeout}ms)`));
       }, timeout);
+      timeoutHandle.unref?.();
 
-      proc.stdout.on('data', (chunk) => chunks.push(chunk));
+      proc.stdout?.on('data', (chunk) => chunks.push(chunk));
+      // 必须持续消费 stderr，防止错误日志超过 64KB 填满 OS 管道缓冲区导致子进程死锁
+      proc.stderr?.on('data', (chunk) => {
+        if (stderrBytes < 4096) {
+          const text = chunk.toString();
+          stderrChunks.push(text);
+          stderrBytes += text.length;
+        }
+      });
 
-      proc.on('exit', (code) => {
-        clearTimeout(timeoutHandle);
+      proc.on('close', (code) => {
         if (code === 0) {
           const buffer = Buffer.concat(chunks);
-          buffer.length > 0 ? resolve(buffer) : reject(new Error('未捕获到帧数据'));
+          buffer.length > 0 ? finish(null, buffer) : finish(new Error('未捕获到帧数据'));
         } else {
-          reject(new Error(`FFmpeg 退出码: ${code}`));
+          const detail = stderrChunks.join('').trim().split(/\r?\n/).slice(-2).join(' | ');
+          finish(new Error(detail ? `FFmpeg 退出码: ${code} (${detail})` : `FFmpeg 退出码: ${code}`));
         }
       });
 
       proc.on('error', (err) => {
-        clearTimeout(timeoutHandle);
-        reject(err);
+        finish(err);
       });
     });
   }
@@ -392,7 +411,9 @@ class FFmpegService {
           cmdRef.kill('SIGKILL');
         } catch {}
       }, 5000);
+      killTimer.unref?.();
       const waitTimer = setTimeout(done, 10000);
+      waitTimer.unref?.();
     });
   }
 
@@ -461,27 +482,36 @@ class FFmpegService {
       ];
       const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
       const proc = spawn(ffmpegPath, args);
+      let settled = false;
+
+      const finish = (err, detected) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        if (err) reject(err);
+        else resolve(detected);
+      };
 
       const timeoutHandle = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`黑帧检测超时 (${timeout}ms)`));
+        try { proc.kill('SIGKILL'); } catch {}
+        finish(new Error(`黑帧检测超时 (${timeout}ms)`));
       }, timeout);
+      timeoutHandle.unref?.();
 
-      proc.stderr.on('data', (data) => stderrLines.push(data.toString()));
+      proc.stdout?.resume?.();
+      proc.stderr?.on('data', (data) => stderrLines.push(data.toString()));
 
-      proc.on('exit', (code) => {
-        clearTimeout(timeoutHandle);
+      proc.on('close', (code) => {
         if (code !== 0 && code !== null) {
-          reject(new Error(`FFmpeg 退出码: ${code}`));
+          finish(new Error(`FFmpeg 退出码: ${code}`));
           return;
         }
         const log = stderrLines.join('\n');
-        resolve(/black_start/i.test(log));
+        finish(null, /black_start/i.test(log));
       });
 
       proc.on('error', (err) => {
-        clearTimeout(timeoutHandle);
-        reject(err);
+        finish(err);
       });
     });
   }
