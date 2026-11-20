@@ -176,7 +176,7 @@ function createApp({
           return sendJson(res, 429, { error: 'too many requests' });
         }
 
-        if (method === 'GET' && pathname === '/health') {
+        if ((method === 'GET' || method === 'HEAD') && pathname === '/health') {
           const ffInfo = ffmpegInstaller.getFfmpegRuntimeInfo();
           return sendJson(res, 200, {
             status: 'ok',
@@ -189,7 +189,7 @@ function createApp({
           });
         }
 
-        if (method === 'GET' && pathname === '/healthz') {
+        if ((method === 'GET' || method === 'HEAD') && pathname === '/healthz') {
           if (!isAuthorized(req, urlObj)) return sendJson(res, 401, { error: 'unauthorized' });
           const stats = typeof scheduler.getStats === 'function' ? scheduler.getStats() : {};
           const activeStreams = stats.activeStreams || 0;
@@ -212,7 +212,7 @@ function createApp({
           });
         }
 
-        if (method === 'GET' && pathname === '/') {
+        if ((method === 'GET' || method === 'HEAD') && pathname === '/') {
           // GET / 仅返回不含任何业务数据的静态页面壳子；数据接口受 DASHBOARD_TOKEN 严格鉴权，确保前端登录门禁可正常展示
           const { renderDashboard } = require('./src/web/dashboard');
           return sendHtml(res, 200, renderDashboard());
