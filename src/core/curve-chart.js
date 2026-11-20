@@ -501,4 +501,5 @@ module.exports = {
   buildWaveSeries,
   renderUnicodeWave,
   renderWaveChartPng,
+  encodeRgbaToPng,
 };

@@ -31,13 +31,18 @@ async function request(url, {
     throw error;
   }
 
-  const rawText = await res.text();
-  let data = rawText;
-  if (responseType === 'json' || (responseType === 'auto' && /^[\[{]/.test(rawText.trim()))) {
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      data = rawText;
+  let data;
+  if (responseType === 'arraybuffer') {
+    data = Buffer.from(await res.arrayBuffer());
+  } else {
+    const rawText = await res.text();
+    data = rawText;
+    if (responseType === 'json' || (responseType === 'auto' && /^[\[{]/.test(rawText.trim()))) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = rawText;
+      }
     }
   }
 
@@ -50,6 +55,7 @@ async function request(url, {
 
   return {
     status: res.status,
+    url: res.url,
     headers: res.headers,
     data,
   };

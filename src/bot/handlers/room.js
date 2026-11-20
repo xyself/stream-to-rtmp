@@ -2,10 +2,13 @@ const { InlineKeyboard, InputFile } = require('grammy');
 const db = require('../../db');
 const scheduler = require('../../core/scheduler');
 const { diagnoseTask } = require('../../core/manager');
+const rooms = require('../../platforms');
 const curveChart = require('../../core/curve-chart');
 const views = require('../views');
 const {
+  detectLiveUrlCandidate,
   parseLiveRoomInput,
+  resolveLiveRoomInput,
   parseQuickAddInput,
   isNumericRoomId,
   isValidRelayTargetUrl,
@@ -78,8 +81,9 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     await ctx.reply(
       '✨ <b>新建转播任务</b>\n\n' +
       '<b>方式 1（极速一行创建）</b>：\n直接发送 <code>直播间链接 + 空格 + rtmp://推流地址</code>\n\n' +
-      '<b>方式 2（分步引导）</b>：\n先发送直播间链接或纯数字房间号：\n' +
-      '<i>· https://live.bilibili.com/房间号\n· https://www.douyu.com/房间号\n· https://live.douyin.com/房间号\n· 纯数字房间号（需手动选平台）</i>',
+      '<b>方式 2（裸丢链接）</b>：\n平时直接把直播间链接（含 <code>v.douyin.com</code> / <code>b23.tv</code> 短链）发给 Bot 即可一键识别建房\n\n' +
+      '<b>方式 3（分步引导）</b>：\n先发送直播间链接或纯数字房间号：\n' +
+      '<i>· https://live.bilibili.com/房间号（或 b23.tv 短链）\n· https://www.douyu.com/房间号\n· https://live.douyin.com/房间号（或 v.douyin.com 短链）\n· 纯数字房间号（需手动选平台）</i>',
       { parse_mode: 'HTML' }
     );
   };
@@ -92,10 +96,95 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     });
   };
 
+  const showQuickSnap = async (ctx) => {
+    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/snap\s*/i, '').trim();
+    const tasks = scheduler.getTrafficStats();
+    if (raw && isNumericRoomId(raw)) {
+      const target = tasks.find((t) => String(t.room_id) === raw);
+      if (!target) {
+        await ctx.reply(`❌ 未找到房间 #${raw}`);
+        return;
+      }
+      const manager = scheduler.getTaskManager?.(target);
+      if (!manager || target.status !== 'ENABLED') {
+        await ctx.reply(`❌ 房间 #${raw} 未启用或未运行，无法截图`);
+        return;
+      }
+      try {
+        const imageBuffer = await manager.captureSnapshot();
+        await sendPhoto(
+          ctx,
+          new InputFile(imageBuffer, `screenshot_${target.room_id}.jpg`),
+          { caption: `📸 ${views.platformLabel(target.platform)} #${target.room_id} 截图\n${new Date().toLocaleString('zh-CN', { hour12: false })}` }
+        );
+      } catch (err) {
+        await sendReply(ctx, `❌ 获取截图失败: ${err.message}`);
+      }
+      return;
+    }
+
+    const enabled = tasks.filter((t) => t.status === 'ENABLED');
+    if (enabled.length === 0) {
+      await ctx.reply('📷 当前没有已启用的房间可截图。', { reply_markup: mainKeyboard });
+      return;
+    }
+    const kb = new InlineKeyboard();
+    enabled.forEach((t) => {
+      const running = t.traffic?.running;
+      const icon = running ? '🟢' : '✅';
+      const host = t.traffic?.roomInfo?.hostName ? ` (${t.traffic.roomInfo.hostName})` : '';
+      kb.text(`${icon} ${views.platformLabel(t.platform)} #${t.room_id}${host}`, `screenshot:${t.id}`).row();
+    });
+    await ctx.reply('📷 <b>快捷截图</b>\n点击下方房间立即抓取当前实时画面（也可直接发 <code>/snap 房间号</code>）：', {
+      parse_mode: 'HTML',
+      reply_markup: kb,
+    });
+  };
+
+  const showQuickDiagnose = async (ctx) => {
+    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/diagnose\s*/i, '').trim();
+    const tasks = scheduler.getTrafficStats();
+    if (raw && isNumericRoomId(raw)) {
+      const target = tasks.find((t) => String(t.room_id) === raw);
+      if (!target) {
+        await ctx.reply(`❌ 未找到房间 #${raw}`);
+        return;
+      }
+      await ctx.reply(`🩺 正在诊断 ${views.platformLabel(target.platform)} #${target.room_id}...`);
+      try {
+        const diag = await diagnoseTask(target);
+        const kb = new InlineKeyboard()
+          .text('🔄 重新诊断', `diagnose:${target.id}`)
+          .text('⚙️ 房间控制台', `manage:${target.id}`);
+        await sendReply(ctx, views.renderDiagnoseReport(target, diag), { parse_mode: 'HTML', reply_markup: kb });
+      } catch (err) {
+        await sendReply(ctx, `❌ 诊断失败：${err.message}`);
+      }
+      return;
+    }
+
+    if (tasks.length === 0) {
+      await ctx.reply('🩺 当前没有配置任何房间。', { reply_markup: mainKeyboard });
+      return;
+    }
+    const kb = new InlineKeyboard();
+    tasks.forEach((t) => {
+      const host = t.traffic?.roomInfo?.hostName ? ` (${t.traffic.roomInfo.hostName})` : '';
+      kb.text(`🩺 ${views.platformLabel(t.platform)} #${t.room_id}${host}`, `diagnose:${t.id}`).row();
+    });
+    await ctx.reply('🩺 <b>链路诊断</b>\n选择要检测 API / Cookie / 源流线路的房间（或发 <code>/diagnose 房间号</code>）：', {
+      parse_mode: 'HTML',
+      reply_markup: kb,
+    });
+  };
+
   bot.command('addroom', startAddRoom);
   bot.command('rooms', showRooms);
+  bot.command('snap', showQuickSnap);
+  bot.command('diagnose', showQuickDiagnose);
   bot.hears('➕ 添加房间', startAddRoom);
   bot.hears('🏠 房间管理', showRooms);
+  bot.hears('📷 快捷截图', showQuickSnap);
 
   bot.callbackQuery(/^manage:(\d+)/, async (ctx) => {
     const taskId = ctx.match[1];
@@ -336,6 +425,92 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     await sendRoomWaveChart(ctx, 'all', 'noon');
   });
 
+  bot.hears('📈 推流曲线', async (ctx) => {
+    await sendRoomWaveChart(ctx, 'all', 'noon');
+  });
+
+  const showSnapSelector = async (ctx) => {
+    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/snap\s*/i, '').trim();
+    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
+    if (raw && isNumericRoomId(raw)) {
+      const found = tasks.find((t) => String(t.room_id) === raw);
+      if (found) {
+        const manager = scheduler.getTaskManager(found);
+        if (!manager || found.status !== 'ENABLED') {
+          await sendReply(ctx, `❌ ${views.platformLabel(found.platform)} #${found.room_id} 未启用或未运行，无法截图`);
+          return;
+        }
+        try {
+          const imageBuffer = await manager.captureSnapshot();
+          await sendPhoto(
+            ctx,
+            new InputFile(imageBuffer, `screenshot_${found.room_id}.jpg`),
+            { caption: `📸 ${views.platformLabel(found.platform)} #${found.room_id} 截图\n${new Date().toLocaleString('zh-CN', { hour12: false })}` }
+          );
+        } catch (error) {
+          await sendReply(ctx, `❌ 获取截图失败: ${error.message || '未知错误'}`);
+        }
+        return;
+      }
+    }
+
+    const enabled = tasks.filter((t) => t.status === 'ENABLED');
+    if (enabled.length === 0) {
+      await sendReply(ctx, '📷 当前没有启用中的直播房间，无法截图。');
+      return;
+    }
+    const kb = new InlineKeyboard();
+    enabled.forEach((task) => {
+      const running = task.traffic?.running;
+      const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
+      kb.text(`${running ? '🟢' : '⚪'} ${views.platformLabel(task.platform)} #${task.room_id}${host}`, `screenshot:${task.id}`).row();
+    });
+    await sendReply(ctx, '📷 <b>快捷截图</b>\n点击要截取实时画面的房间（也可直接发 <code>/snap 房间号</code>）：', {
+      parse_mode: 'HTML',
+      reply_markup: kb,
+    });
+  };
+
+  bot.command('snap', showSnapSelector);
+  bot.hears('📷 快捷截图', showSnapSelector);
+
+  const showDiagnoseSelector = async (ctx) => {
+    const raw = getMessageTextOrEmpty(ctx.message).replace(/^\/diagnose\s*/i, '').trim();
+    const tasks = scheduler.getTrafficStats?.() || db.getAllTasks();
+    if (raw && isNumericRoomId(raw)) {
+      const found = tasks.find((t) => String(t.room_id) === raw);
+      if (found) {
+        await sendReply(ctx, `🔍 正在诊断 ${views.platformLabel(found.platform)} #${found.room_id}，请稍候...`);
+        try {
+          const report = await diagnoseTask(found);
+          const kb = new InlineKeyboard()
+            .text('🔄 重新诊断', `diagnose:${found.id}`)
+            .text('⚙️ 返回控制台', `manage:${found.id}`);
+          await sendReply(ctx, views.renderDiagnoseReport(found, report), { parse_mode: 'HTML', reply_markup: kb });
+        } catch (err) {
+          await sendReply(ctx, `❌ 诊断失败：${err.message}`);
+        }
+        return;
+      }
+    }
+
+    if (tasks.length === 0) {
+      await sendReply(ctx, '🔍 当前没有配置任何房间。');
+      return;
+    }
+    const kb = new InlineKeyboard();
+    tasks.forEach((task) => {
+      const host = task.traffic?.roomInfo?.hostName ? ` (${task.traffic.roomInfo.hostName})` : '';
+      kb.text(`🔍 ${views.platformLabel(task.platform)} #${task.room_id}${host}`, `diagnose:${task.id}`).row();
+    });
+    await sendReply(ctx, '🔍 <b>链路诊断</b>\n选择要诊断拉流与编码链路的房间（或发 <code>/diagnose 房间号</code>）：', {
+      parse_mode: 'HTML',
+      reply_markup: kb,
+    });
+  };
+
+  bot.command('diagnose', showDiagnoseSelector);
+
   bot.callbackQuery(/^curve:(\d+|all):(noon|midnight)$/, async (ctx) => {
     const [, targetId, mode] = ctx.match;
     await ctx.answerCallbackQuery(
@@ -460,8 +635,30 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     }
     state.platform = ctx.match[1];
     state.step = 'wait_target_url';
+    state.startedAt = Date.now();
     await ctx.answerCallbackQuery();
     await ctx.reply('请输入主 RTMP/RTMPS 推流地址（支持多个，用空格或换行分隔）：');
+  });
+
+  bot.callbackQuery(/^quickadd:confirm:(bilibili|douyu|douyin):(\d+)$/, async (ctx) => {
+    const [, platform, roomId] = ctx.match;
+    const state = ensureAddRoomState(ctx.session);
+    state.platform = platform;
+    state.roomId = roomId;
+    state.step = 'wait_target_url';
+    state.startedAt = Date.now();
+    await ctx.answerCallbackQuery('✅ 已确认房间，请发送推流地址');
+    await ctx.reply(
+      `✅ 已选定：<b>${views.platformLabel(platform)}</b> 房间 <b>#${roomId}</b>\n\n` +
+      `请直接回复主 RTMP/RTMPS 推流地址（支持多条，用空格、逗号或换行分隔；输入 /cancel 可取消）：`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  bot.callbackQuery('quickadd:cancel', async (ctx) => {
+    resetAddRoomState(ctx.session);
+    await ctx.answerCallbackQuery('已忽略');
+    await safeEditMessageText(ctx, '已忽略该直播间链接。');
   });
 
   bot.on('message:text', async (ctx, next) => {
@@ -500,8 +697,17 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
       return;
     }
 
-    // 无论是否在 wait_room_id 步骤，只要消息中同时包含【直播间链接/平台房间号 + rtmp地址】，且不在改地址会话中，直接一步创建！
-    if (!ctx.session.editRtmp && !ctx.session.addRtmp && !ctx.session.editRoom && !ctx.session.setCookie && !ctx.session.editRoomCookie) {
+    const inOtherSession = Boolean(
+      ctx.session.editRtmp ||
+      ctx.session.addRtmp ||
+      ctx.session.editRoom ||
+      ctx.session.setCookie ||
+      ctx.session.editRoomCookie ||
+      ctx.session.waitFallbackPhoto
+    );
+
+    // 无论是否在 wait_room_id 步骤，只要消息中同时包含【直播间链接/平台房间号 + rtmp地址】，且不在其他会话中，直接一步创建！
+    if (!inOtherSession) {
       const quick = parseQuickAddInput(text);
       if (quick) {
         resetAddRoomState(ctx.session);
@@ -515,9 +721,10 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
     }
 
     if (state.step === 'wait_room_id') {
-      const parsed = parseLiveRoomInput(text);
+      const parsed = await resolveLiveRoomInput(text);
       if (parsed.error) { await ctx.reply(`❌ ${parsed.error}`); return; }
       state.roomId = parsed.roomId;
+      state.startedAt = Date.now();
       if (parsed.platform) {
         state.platform = parsed.platform;
         state.step = 'wait_target_url';
@@ -578,6 +785,55 @@ function register(bot, { safeEditMessageText, ephemeralReply, ephemeralPhoto, bu
         await ctx.reply(`❌ 修改失败：${err.message}`);
       }
       return;
+    }
+
+    // 裸丢直播间链接（含短链）一键识别建房
+    if (!inOtherSession && !state.step && detectLiveUrlCandidate(text)) {
+      const resolved = await resolveLiveRoomInput(text);
+      if (resolved.error) {
+        await ctx.reply(`⚠️ ${resolved.error}`);
+        return;
+      }
+      if (resolved.platform && resolved.roomId) {
+        const existing = db.getAllTasks().find(
+          (t) => t.platform === resolved.platform && String(t.room_id) === String(resolved.roomId)
+        );
+        if (existing) {
+          const kb = new InlineKeyboard().text('⚙️ 打开房间控制台', `manage:${existing.id}`);
+          await ctx.reply(
+            `ℹ️ 检测到直播间：<b>${views.platformLabel(resolved.platform)} #${resolved.roomId}</b>\n该房间已在你的监控列表中。`,
+            { parse_mode: 'HTML', reply_markup: kb }
+          );
+          return;
+        }
+
+        let infoLine = '';
+        try {
+          const probeRoom = rooms.create(resolved.platform, resolved.roomId);
+          const info = await Promise.race([
+            probeRoom.getInfo(),
+            new Promise((resolve) => setTimeout(() => resolve(null), 2500)),
+          ]);
+          if (info) {
+            const liveTag = info.isLive ? '🟢 正在直播' : '⚪ 当前未开播';
+            const hostPart = info.hostName ? `主播：<b>${views.escapeHtml(info.hostName)}</b>\n` : '';
+            const titlePart = info.title ? `标题：${views.escapeHtml(info.title)}\n` : '';
+            infoLine = `\n${hostPart}${titlePart}状态：${liveTag}\n`;
+          }
+        } catch {}
+
+        const kb = new InlineKeyboard()
+          .text('✅ 添加此房间', `quickadd:confirm:${resolved.platform}:${resolved.roomId}`)
+          .text('❌ 忽略', 'quickadd:cancel');
+        await ctx.reply(
+          `🔗 <b>识别到直播间链接</b>\n\n` +
+          `平台：<b>${views.platformLabel(resolved.platform)}</b>\n` +
+          `房间号：<code>${resolved.roomId}</code>` +
+          `${infoLine}\n是否添加到转播列表？`,
+          { parse_mode: 'HTML', reply_markup: kb }
+        );
+        return;
+      }
     }
 
     await next();

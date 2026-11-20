@@ -12,6 +12,7 @@ const gistSync = require('../db/gist-sync');
 const http = require('../platforms/http');
 const widgetHelper = require('./widget');
 const ffmpegInstaller = require('../services/ffmpeg-installer');
+const fallbackImage = require('../services/fallback-image');
 const housekeeping = require('../core/housekeeping');
 const runtimeEnv = require('../core/runtime-env');
 const {
@@ -55,10 +56,13 @@ function createChatGuard(allowedChatId = parseAllowedChatId()) {
 
 function buildMainKeyboard() {
   return new Keyboard()
-    .text('📺 管理面板').text('🏠 房间管理').text('➕ 添加房间')
+    .text('📊 推流状态').text('📈 推流曲线').text('📺 管理面板')
     .row()
-    .text('🔔 通知管理').text('📊 推流状态').text('🛠️ FFmpeg 参数')
-    .resized();
+    .text('🏠 房间管理').text('➕ 添加房间').text('📷 快捷截图')
+    .row()
+    .text('📜 实时日志').text('💾 备份恢复').text('⚙️ 通知与参数')
+    .resized()
+    .persistent();
 }
 
 function buildDashboardKeyboard() {
@@ -67,6 +71,7 @@ function buildDashboardKeyboard() {
   const nightlyOn = db.getSetting?.('daily_restart') !== '0' && db.getSetting?.('nightly_restart') !== '0';
   const failbackOn = db.getSetting?.('auto_failback') !== '0';
   const liveSnapshotOn = db.getSetting?.('live_snapshot') === '1';
+  const fallbackOn = db.getSetting?.('fallback_image') === '1';
   const autoBackupOn = db.getSetting?.('auto_tg_backup') !== '0';
   const hour = db.getSetting?.('daily_restart_hour') || db.getSetting?.('nightly_restart_hour') || '10';
   const isFreeBsdOrServ00 = process.platform === 'freebsd' || Boolean(process.env.SERV00);
@@ -82,23 +87,25 @@ function buildDashboardKeyboard() {
     .text(`🔊 音频修复: ${audioFixOn ? '✅ 开启' : '⚪ 关闭'}`, 'global_toggle_audio_fix')
     .row()
     .text(`📷 开播截图: ${liveSnapshotOn ? '✅ 开启' : '⚪ 省内存'}`, 'global_toggle_live_snapshot')
+    .text(`🖼️ 断流保底图: ${fallbackOn ? '✅ 开' : '⚪ 关'}`, 'global_toggle_fallback')
+    .row()
     .text(`💾 自动TG备份: ${autoBackupOn ? '✅ 开' : '⚪ 关'}`, 'global_toggle_auto_backup')
+    .text(`🔀 自动切回主线: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback')
     .row()
     .text(`🔄 每日维护: ${nightlyOn ? `✅ ${hour}点` : '⛔ 关'}`, 'global_toggle_nightly')
     .text(`⏰ 维护时间: ${hour}:00`, 'global_set_restart_hour')
     .row()
-    .text(`🔀 自动切回主线: ${failbackOn ? '✅ 开' : '⛔ 关'}`, 'global_toggle_failback')
     .text('📈 24h推流曲线', 'curve:all:noon')
-    .row()
     .text('📜 查日志', 'global_view_logs')
     .text('🛠️ FFmpeg 参数', 'global_ffmpeg_params')
-    .text(isFreeBsdOrServ00 ? 'ℹ️ FFmpeg 说明' : '⬆️ 升级FFmpeg', isFreeBsdOrServ00 ? 'global_ffmpeg_info' : 'global_update_ffmpeg')
     .row()
     .text('📤 导出备份文件', 'global_export_backup')
     .text('📥 导入备份文件', 'global_import_backup')
     .text('📩 测试通知', 'global_test_notify')
-    .row();
-  keyboard.text('☁️ 上传到 Gist', 'global_sync_gist').text('📥 从 Gist 恢复', 'global_restore_gist');
+    .row()
+    .text('☁️ 上传到 Gist', 'global_sync_gist')
+    .text('📥 从 Gist 恢复', 'global_restore_gist')
+    .text(isFreeBsdOrServ00 ? 'ℹ️ FFmpeg 说明' : '⬆️ 升级FFmpeg', isFreeBsdOrServ00 ? 'global_ffmpeg_info' : 'global_update_ffmpeg');
   return keyboard;
 }
 
@@ -301,19 +308,30 @@ async function registerBotCommands(bot) {
   if (!bot?.api?.setMyCommands) return;
 
   const commands = [
-    { command: 'start',   description: '🚀 打开控制中心主菜单' },
-    { command: 'curve',   description: '📈 24小时推流码率波浪曲线图 (12:00→12:00)' },
-    { command: 'status',  description: '📺 推流状态 & 房间详情' },
-    { command: 'panel',   description: '⚙️ 全局控制台（开关/重启/备份）' },
-    { command: 'rooms',   description: '🏠 房间列表管理（含独立Cookie/编码/诊断）' },
-    { command: 'addroom', description: '➕ 添加新直播房间（支持一行创建）' },
-    { command: 'backup',  description: '📤 一键导出/导入 JSON 备份文件' },
-    { command: 'cookie',  description: '🍪 为指定房间绑定独立 Cookie' },
-    { command: 'notify',  description: '🔔 通知开关设置' },
-    { command: 'logs',    description: '📜 查看最近日志' },
-    { command: 'ffmpeg',  description: '🛠️ 查看 FFmpeg 推流参数' },
-    { command: 'traffic', description: '📈 流量 & 码率统计' },
-    { command: 'widget',  description: '📊 实时监控 Widget（Bot API 10.4）' },
+    { command: 'start',    description: '🚀 打开控制中心与底部键盘' },
+    { command: 'status',   description: '📊 推流状态 & 房间详情' },
+    { command: 'curve',    description: '📈 24小时推流码率波浪曲线图' },
+    { command: 'traffic',  description: '📡 实时流量 & 码率统计' },
+    { command: 'widget',   description: '🎛️ 实时监控 Widget（Bot API 10.4）' },
+    { command: 'rooms',    description: '🏠 房间列表管理（Cookie/编码/线路）' },
+    { command: 'addroom',  description: '➕ 添加房间（支持贴链接或一行创建）' },
+    { command: 'addrtmp',  description: '🔗 为房间追加 RTMP 推流线路' },
+    { command: 'snap',     description: '📷 快捷截取直播间实时画面' },
+    { command: 'diagnose', description: '🔍 房间拉流与推流链路诊断' },
+    { command: 'cookie',   description: '🍪 为指定房间绑定独立 Cookie' },
+    { command: 'panel',    description: '📺 全局控制台（开关/重启/备份）' },
+    { command: 'fallback', description: '🖼️ 断流保底图开关与自定义图片' },
+    { command: 'startall', description: '▶️ 一键开启全部房间推流' },
+    { command: 'stopall',  description: '🛑 一键暂停全部房间推流' },
+    { command: 'restart',  description: '🧹 清理异常进程并重启全部推流' },
+    { command: 'logs',     description: '📜 查看最近运行日志' },
+    { command: 'sys',      description: '🖥️ 服务器 CPU/内存/磁盘/FFmpeg 状态' },
+    { command: 'backup',   description: '💾 导出 JSON 备份文件' },
+    { command: 'gist',     description: '☁️ Gist 云端同步与恢复' },
+    { command: 'notify',   description: '🔔 通知推送开关设置' },
+    { command: 'ffmpeg',   description: '🛠️ 查看 FFmpeg 推流参数' },
+    { command: 'cancel',   description: '❎ 取消当前输入会话' },
+    { command: 'help',     description: '❓ 快捷操作与命令速查' },
   ];
 
   // 私聊命令列表（完整）
@@ -611,11 +629,211 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await ephemeralReply(ctx, views.renderFfmpegParams(stats), { parse_mode: 'HTML' });
   };
 
+  const renderFallbackPanel = () => {
+    const enabled = db.getSetting?.('fallback_image') === '1';
+    const info = fallbackImage.getFallbackImageInfo();
+    const sizeKb = info.sizeBytes > 0 ? `${(info.sizeBytes / 1024).toFixed(1)} KB` : '自动生成';
+    const text =
+      `🖼️ <b>轻量断流保底图设置</b>\n\n` +
+      `当前状态：<b>${enabled ? '✅ 已开启' : '⚪ 已关闭'}</b>\n` +
+      `当前图片：<b>${info.isCustom ? '自定义图片' : '内置深灰极简图'}</b>（${sizeKb}）\n` +
+      `判定策略：断流后先顶保底图，每 15s 复核平台状态并尝试重拉真流；连续 3 次显示未开播判定为真下播，最长保底 3 分钟自动熔断。\n\n` +
+      `<i>💡 点击下方「上传自定义图片」后直接发送一张图片即可替换保底画面。</i>`;
+    const kb = new InlineKeyboard()
+      .text(enabled ? '⚪ 关闭断流保底图' : '✅ 开启断流保底图', 'fallback_toggle')
+      .row()
+      .text('📤 上传自定义图片', 'fallback_upload')
+      .text('♻️ 恢复默认图', 'fallback_reset')
+      .row()
+      .text('⬅️ 返回管理面板', 'log_back');
+    return { text, kb };
+  };
+
+  const showFallbackPanel = async (ctx, edit = false) => {
+    const { text, kb } = renderFallbackPanel();
+    const opts = { parse_mode: 'HTML', reply_markup: kb };
+    if (edit) {
+      await safeEditMessageText(ctx, text, opts);
+    } else {
+      await ctx.reply(text, opts);
+    }
+  };
+
+  const showSystemStatus = async (ctx) => {
+    const sys = getSystemInfo({ forceRefreshFfmpeg: true });
+    const stats = scheduler.getStats();
+    const text =
+      `🖥️ <b>服务器与运行环境状态</b>\n\n` +
+      `• 运行模式：<code>${views.escapeHtml(sys.runtimeLabel || 'Standard')}</code>\n` +
+      `• 系统 CPU：<b>${sys.cpuPct ?? 0}%</b>（${sys.cpuCores || 1} 核）\n` +
+      `• 内存占用：<b>${views.escapeHtml(sys.memDisplay || `${sys.memUsedMb}/${sys.memTotalMb} MB`)}</b>\n` +
+      `• 磁盘占用：<b>${views.escapeHtml(sys.diskDisplay || `${sys.diskPct ?? 0}%`)}</b>\n` +
+      `• 运行时长：<b>${views.escapeHtml(sys.uptime || '-')}</b>\n` +
+      `• FFmpeg：<code>${views.escapeHtml(sys.ffmpegVersion || 'unknown')}</code>\n` +
+      `• 活跃推流：<b>${stats.running || 0}</b> / ${stats.total || 0} 房间`;
+    await ephemeralReply(ctx, text, { parse_mode: 'HTML' });
+  };
+
+  const showBackupMenu = async (ctx) => {
+    const kb = new InlineKeyboard()
+      .text('📤 导出 JSON 备份', 'global_export_backup')
+      .text('📥 导入备份说明', 'global_import_backup')
+      .row()
+      .text('☁️ 上传到 Gist', 'global_sync_gist')
+      .text('📥 从 Gist 恢复', 'global_restore_gist');
+    await ctx.reply(
+      `💾 <b>备份与云端同步</b>\n\n` +
+      `• 可一键导出完整 <code>.json</code> 配置（含房间、多路 RTMP、独立 Cookie 与全局设置）\n` +
+      `• 恢复时直接把 <code>.json</code> 文件发送或转发回本窗口即可自动热重载`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    );
+  };
+
+  const showSettingsHub = async (ctx) => {
+    const fallbackOn = db.getSetting?.('fallback_image') === '1';
+    const kb = new InlineKeyboard()
+      .text('🔔 通知开关设置', 'settings_notify')
+      .text('🛠️ FFmpeg 参数', 'settings_ffmpeg')
+      .row()
+      .text(`🖼️ 断流保底图 (${fallbackOn ? '开' : '关'})`, 'settings_fallback')
+      .text('🖥️ 服务器状态', 'settings_sys')
+      .row()
+      .text('🎛️ 实时 Widget', 'settings_widget')
+      .text('📺 打开全局面板', 'log_back');
+    await ctx.reply(
+      `⚙️ <b>通知与系统参数</b>\n请选择要查看或调整的配置项：`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    );
+  };
+
+  const showHelp = async (ctx) => {
+    const text =
+      `❓ <b>StreamOps 快捷用法速查</b>\n\n` +
+      `1. <b>裸丢链接一键建房</b>：直接把 B站/斗鱼/抖音直播间链接（支持 <code>b23.tv</code> / <code>v.douyin.com</code> 短链）发给 Bot，点确认即可建房。\n` +
+      `2. <b>一行极速建房（支持并发多推）</b>：\n` +
+      `   <code>https://live.bilibili.com/1000 rtmp://主线 rtmp://第二路</code>\n` +
+      `3. <b>一键还原配置</b>：直接把导出的 <code>.json</code> 备份文件发回本窗口。\n` +
+      `4. <b>自定义断流保底图</b>：发送 <code>/fallback</code> 开启并上传任意图片。\n` +
+      `5. <b>随时退出输入态</b>：发送 <code>/cancel</code> 清空当前会话。\n\n` +
+      `常用快捷命令：<code>/status</code> · <code>/curve</code> · <code>/snap</code> · <code>/diagnose</code> · <code>/startall</code> · <code>/stopall</code> · <code>/restart</code> · <code>/sys</code> · <code>/gist</code>`;
+    await ctx.reply(text, { parse_mode: 'HTML', reply_markup: mainKeyboard });
+  };
+
   bot.hears('📺 管理面板', showDashboard);
   bot.hears('📊 推流状态', showStatus);
   bot.hears('🛠️ FFmpeg 参数', showFfmpegParams);
-  bot.command('ffmpeg', showFfmpegParams);
   bot.hears('🔔 通知管理', showNotificationSettings);
+  bot.hears('📜 实时日志', async (ctx) => { await showLogs(ctx); });
+  bot.hears('💾 备份恢复', showBackupMenu);
+  bot.hears('⚙️ 通知与参数', showSettingsHub);
+
+  bot.command('ffmpeg', showFfmpegParams);
+  bot.command('fallback', async (ctx) => { await showFallbackPanel(ctx, false); });
+  bot.command('sys', showSystemStatus);
+  bot.command('gist', showBackupMenu);
+  bot.command('help', showHelp);
+  bot.command('cancel', async (ctx) => {
+    resetAllSessions(ctx.session);
+    await ctx.reply('❎ 已取消当前输入操作并重置会话。', { reply_markup: mainKeyboard });
+  });
+  bot.command('startall', async (ctx) => {
+    db.updateAllTasksStatus('ENABLED');
+    await scheduler.tick();
+    await ctx.reply('▶️ 已一键开启全部房间监控与推流任务。', { reply_markup: mainKeyboard });
+  });
+  bot.command('stopall', async (ctx) => {
+    db.updateAllTasksStatus('DISABLED');
+    await scheduler.stopAll();
+    await ctx.reply('🛑 已一键暂停全部房间推流任务。', { reply_markup: mainKeyboard });
+  });
+  bot.command('restart', async (ctx) => {
+    await ctx.reply('🧹 正在清理异常 FFmpeg 进程并重启全部推流...');
+    await scheduler.stopAll();
+    scheduler.start();
+    await ctx.reply('✅ 全部推流任务已重启完成。', { reply_markup: mainKeyboard });
+  });
+
+  bot.callbackQuery('settings_notify', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showNotificationSettings(ctx);
+  });
+  bot.callbackQuery('settings_ffmpeg', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showFfmpegParams(ctx);
+  });
+  bot.callbackQuery('settings_fallback', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showFallbackPanel(ctx, true);
+  });
+  bot.callbackQuery('settings_sys', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showSystemStatus(ctx);
+  });
+  bot.callbackQuery('settings_widget', async (ctx) => {
+    await ctx.answerCallbackQuery('请发送 /widget 打开实时监控 Widget');
+  });
+
+  bot.callbackQuery('global_toggle_fallback', async (ctx) => {
+    const newValue = db.getSetting('fallback_image') === '1' ? '0' : '1';
+    db.setSetting('fallback_image', newValue);
+    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 已开启轻量断流保底图' : '⚪ 已关闭断流保底图');
+    await refreshDashboard(ctx);
+  });
+
+  bot.callbackQuery('fallback_toggle', async (ctx) => {
+    const newValue = db.getSetting('fallback_image') === '1' ? '0' : '1';
+    db.setSetting('fallback_image', newValue);
+    await ctx.answerCallbackQuery(newValue === '1' ? '✅ 已开启轻量断流保底图' : '⚪ 已关闭断流保底图');
+    await showFallbackPanel(ctx, true);
+  });
+
+  bot.callbackQuery('fallback_upload', async (ctx) => {
+    ctx.session.waitFallbackPhoto = { startedAt: Date.now() };
+    await ctx.answerCallbackQuery('请发送一张图片');
+    await ctx.reply(
+      `📤 <b>上传自定义断流保底图</b>\n\n` +
+      `请直接向本窗口发送一张图片（推荐 16:9 横图，如 1280×720）。\n` +
+      `<i>输入 /cancel 可取消上传。</i>`,
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  bot.callbackQuery('fallback_reset', async (ctx) => {
+    fallbackImage.clearCustomFallbackImage();
+    await ctx.answerCallbackQuery('♻️ 已恢复默认极简保底图');
+    await showFallbackPanel(ctx, true);
+  });
+
+  bot.on('message:photo', async (ctx, next) => {
+    if (!ctx.session.waitFallbackPhoto) {
+      await next();
+      return;
+    }
+    const photos = ctx.message?.photo;
+    if (!Array.isArray(photos) || photos.length === 0) {
+      await ctx.reply('❌ 未识别到图片，请重新发送一张图片或发送 /cancel 取消。');
+      return;
+    }
+    try {
+      const largest = photos[photos.length - 1];
+      const fileInfo = await ctx.api.getFile(largest.file_id);
+      if (!fileInfo?.file_path) {
+        throw new Error('无法获取 Telegram 图片下载路径');
+      }
+      const fileUrl = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
+      const res = await http.get(fileUrl, { responseType: 'arraybuffer', timeout: 20000 });
+      const buf = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data);
+      fallbackImage.saveCustomFallbackImage(buf);
+      ctx.session.waitFallbackPhoto = null;
+      await ctx.reply(
+        `✅ <b>自定义断流保底图已保存！</b>（${(buf.length / 1024).toFixed(1)} KB）\n` +
+        `下次触发断流保底时将自动使用这张图片。`,
+        { parse_mode: 'HTML', reply_markup: renderFallbackPanel().kb }
+      );
+    } catch (err) {
+      await ctx.reply(`❌ 保存保底图失败：${err.message}`);
+    }
+  });
 
 
   bot.callbackQuery(/^ntoggle:(.+)/, async (ctx) => {

@@ -97,6 +97,14 @@ function getConfig() {
       liveVerifyIntervalMs: intEnv('LIVE_VERIFY_INTERVAL_MS', 300000),
       offlineConfirmCount: intEnv('OFFLINE_CONFIRM_COUNT', 2),
     },
+    fallback: {
+      enabledDefault: strEnv('FALLBACK_ENABLED', '0') === '1',
+      imagePath: strEnv('FALLBACK_IMAGE_PATH', path.join(__dirname, '../../data/fallback.jpg')),
+      defaultImagePath: path.join(__dirname, '../../data/fallback-default.png'),
+      probeIntervalMs: intEnv('FALLBACK_PROBE_INTERVAL_MS', 15000),
+      maxDurationMs: intEnv('FALLBACK_MAX_DURATION_MS', 180000),
+      offlineConfirmCount: intEnv('FALLBACK_OFFLINE_CONFIRM_COUNT', 3),
+    },
     housekeeping: {
       digestHour: intEnv('DIGEST_HOUR', 8),
       defaultRestartHour: intEnv('DAILY_RESTART_HOUR', 10),

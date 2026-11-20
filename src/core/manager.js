@@ -2,6 +2,7 @@ const config = require('../config');
 const db = require('../db');
 const rooms = require('../platforms');
 const FFmpegService = require('../services/ffmpeg-service');
+const fallbackImage = require('../services/fallback-image');
 const StreamHealthMonitor = require('./health-monitor');
 const eventBus = require('./events');
 const views = require('../bot/views');
@@ -266,6 +267,10 @@ class StreamManager {
     };
     this.currentStreamUrl = null;
     this.roomInfo = null;
+    this.isFallbackActive = false;
+    this._fallbackStartedAt = null;
+    this._fallbackTimer = null;
+    this._fallbackOfflineCount = 0;
 
     this.ffmpeg = new FFmpegService({
       roomId: task.room_id,
@@ -287,7 +292,15 @@ class StreamManager {
         });
       },
       onEnd: () => {
-        if (!this.isStopping) this.handleStreamEnded();
+        if (this.isStopping) return;
+        if (this.isFallbackEnabled() && this._streamStartedAt && !this.isFallbackActive) {
+          this.enterFallbackMode('拉流中断 (EOF)').catch((err) => {
+            console.error(`[${this.task.room_id}] 启动保底图失败:`, err.message);
+            this.handleStreamEnded();
+          });
+          return;
+        }
+        this.handleStreamEnded();
       },
     });
     this.process = null;
@@ -457,6 +470,7 @@ class StreamManager {
       updatedAt: ffmpegStats.updatedAt,
       startedAt: ffmpegStats.startedAt,
       running: ffmpegStats.running || false,
+      fallbackActive: !!this.isFallbackActive,
       lastRefreshAt: this.trafficStats.lastRefreshAt,
       errorCount: this.errorCount,
       lastSuccessAt: this.lastSuccessAt,
@@ -475,7 +489,7 @@ class StreamManager {
   }
 
   checkHealth() {
-    if (this.isStopping || !this.ffmpeg || this._handlingFfmpegError) return;
+    if (this.isStopping || !this.ffmpeg || this._handlingFfmpegError || this.isFallbackActive) return;
     const stats = this.ffmpeg.getTrafficStats();
     if (!stats.running) return;
 
@@ -696,23 +710,161 @@ class StreamManager {
     }
   }
 
+  isFallbackEnabled() {
+    const val = db.getSetting?.('fallback_image');
+    if (val === '1') return true;
+    if (val === '0') return false;
+    return Boolean(config.fallback?.enabledDefault);
+  }
+
+  _clearFallbackTimer() {
+    if (this._fallbackTimer) {
+      clearTimeout(this._fallbackTimer);
+      this._fallbackTimer = null;
+    }
+  }
+
+  async enterFallbackMode(reason = '源流中断', { initialOfflineCount = 0 } = {}) {
+    if (this.isStopping || this.isFallbackActive) return false;
+    const gen = this._sessionGen;
+    this.saveSessionStats();
+    await this.stopStreaming();
+    if (this.isStopping || gen !== this._sessionGen) return false;
+
+    const imgPath = fallbackImage.ensureFallbackImage();
+    this.isFallbackActive = true;
+    this._fallbackStartedAt = Date.now();
+    this._fallbackOfflineCount = initialOfflineCount;
+    this.process = this.ffmpeg.startFallback(imgPath);
+
+    console.log(`[${this.task.room_id}] 已切入轻量断流保底图（原因: ${reason}）`);
+    this._emitNotify({
+      taskId: this.task.id,
+      type: 'failover',
+      message: `🖼️ 检测到断流（${reason}），已切换保底图顶住推流，后台每 ${Math.round((config.fallback?.probeIntervalMs || 15000) / 1000)} 秒探测恢复中...`,
+    });
+
+    this._scheduleFallbackProbe(gen);
+    return true;
+  }
+
+  _scheduleFallbackProbe(gen) {
+    this._clearFallbackTimer();
+    const interval = config.fallback?.probeIntervalMs || 15000;
+    this._fallbackTimer = setTimeout(() => {
+      this._fallbackTimer = null;
+      this._probeDuringFallback(gen).catch((err) => {
+        console.error(`[${this.task.room_id}] 保底探测异常:`, err.message);
+      });
+    }, interval);
+  }
+
+  async _probeDuringFallback(gen) {
+    if (this.isStopping || !this.isFallbackActive || gen !== this._sessionGen) return;
+
+    const maxMs = config.fallback?.maxDurationMs || 180000;
+    const elapsed = Date.now() - (this._fallbackStartedAt || Date.now());
+    if (elapsed >= maxMs) {
+      console.log(`[${this.task.room_id}] 保底图已达最长时长 (${Math.round(elapsed / 1000)}s)，停止保底并转入常规重试`);
+      await this.stopStreaming();
+      if (this.isStopping || gen !== this._sessionGen) return;
+      this._emitNotify({
+        taskId: this.task.id,
+        type: 'ffmpeg_error',
+        message: `🖼️ 保底图已持续 ${Math.round(elapsed / 1000)} 秒仍未恢复源流，已停止保底推流防止空烧流量`,
+      });
+      this.scheduleStart(this.retryPolicy.nextDelay());
+      return;
+    }
+
+    let info = null;
+    try {
+      info = await this.room.getInfo();
+    } catch (err) {
+      if (this.isStopping || !this.isFallbackActive || gen !== this._sessionGen) return;
+      console.error(`[${this.task.room_id}] 保底期间查询状态失败（维持保底）:`, err.message);
+      this._scheduleFallbackProbe(gen);
+      return;
+    }
+
+    if (this.isStopping || !this.isFallbackActive || gen !== this._sessionGen) return;
+
+    if (info && info.isLive === false) {
+      this._fallbackOfflineCount += 1;
+      const confirmTarget = config.fallback?.offlineConfirmCount || 3;
+      console.log(`[${this.task.room_id}] 保底防抖复核：平台显示未开播 (${this._fallbackOfflineCount}/${confirmTarget})`);
+      if (this._fallbackOfflineCount >= confirmTarget) {
+        this.handleStreamEnded();
+        return;
+      }
+      this._scheduleFallbackProbe(gen);
+      return;
+    }
+
+    // 平台显示在播（或未知），重置离线计数并尝试重拉真实流
+    this._fallbackOfflineCount = 0;
+    try {
+      const urls = await this.room.getStreamUrls();
+      if (this.isStopping || !this.isFallbackActive || gen !== this._sessionGen) return;
+      if (Array.isArray(urls) && urls.length > 0) {
+        console.log(`[${this.task.room_id}] 源流已恢复，退出保底图切回真实画面`);
+        await this.stopStreaming();
+        if (this.isStopping || gen !== this._sessionGen) return;
+        const streamUrl = urls[0];
+        this.backupUrls = urls.slice(1);
+        this.primaryUrl = streamUrl;
+        this.currentStreamUrl = streamUrl;
+        this.consecutiveStreamFailures = 0;
+        this.health.resetSession();
+        this.process = this.ffmpeg.start(streamUrl);
+        this.trafficStats.lastRefreshAt = new Date().toISOString();
+        this.retryPolicy.reset();
+        this._emitNotify({
+          taskId: this.task.id,
+          type: 'recover',
+          message: `✅ 源流已恢复（保底耗时 ${Math.round(elapsed / 1000)} 秒），已切回正常直播画面`,
+        });
+        return;
+      }
+    } catch (err) {
+      if (this.isStopping || !this.isFallbackActive || gen !== this._sessionGen) return;
+      console.error(`[${this.task.room_id}] 保底期间重拉流失败:`, err.message);
+    }
+
+    this._scheduleFallbackProbe(gen);
+  }
+
   async handleFfmpegError(msg) {
     if (this.isStopping || this._handlingFfmpegError) return;
     this._handlingFfmpegError = true;
     const gen = this._sessionGen;
+    const wasFallback = this.isFallbackActive;
+    const hadActiveStream = Boolean(this._streamStartedAt);
 
     try {
+      let checkedOffline = false;
       try {
         const info = await this.room.getInfo();
         if (this.isStopping || gen !== this._sessionGen) return;
         if (info && info.isLive === false) {
-          console.log(`[${this.task.room_id}] 平台显示已下播，FFmpeg 报错按正常结束处理`);
-          this.handleStreamEnded();
-          return;
+          if (!wasFallback && hadActiveStream && this.isFallbackEnabled()) {
+            checkedOffline = true;
+          } else {
+            console.log(`[${this.task.room_id}] 平台显示已下播，FFmpeg 报错按正常结束处理`);
+            this.handleStreamEnded();
+            return;
+          }
         }
       } catch (err) {
         if (this.isStopping || gen !== this._sessionGen) return;
         console.error(`[${this.task.room_id}] 下播预检失败，按故障处理:`, err.message);
+      }
+
+      if (checkedOffline) {
+        this.dailyDrops += 1;
+        this.sessionDrops += 1;
+        const entered = await this.enterFallbackMode('疑似下播/断线，进入防抖保底', { initialOfflineCount: 1 });
+        if (entered) return;
       }
 
       this.errorCount += 1;
@@ -745,8 +897,20 @@ class StreamManager {
       }
 
       // 优先秒切已获取的备用源流线路（避免单节点故障白等 20s 刷新全流程）
-      if (this.tryFailover(msg)) {
+      if (!wasFallback && this.tryFailover(msg)) {
         return;
+      }
+
+      // 备线不可用时，如开启轻量保底图且本场已在推流，切入保底图顶住下游 RTMP
+      if (!wasFallback && hadActiveStream && this.isFallbackEnabled()) {
+        this.dailyDrops += 1;
+        this.sessionDrops += 1;
+        try {
+          const entered = await this.enterFallbackMode(msg, { initialOfflineCount: 0 });
+          if (entered) return;
+        } catch (err) {
+          console.error(`[${this.task.room_id}] 启动保底图失败，退回常规重试:`, err.message);
+        }
       }
 
       const isUrlExpired =
@@ -875,6 +1039,10 @@ class StreamManager {
 
   stopStreaming() {
     this._pendingLiveNotify = null;
+    this._clearFallbackTimer();
+    this.isFallbackActive = false;
+    this._fallbackStartedAt = null;
+    this._fallbackOfflineCount = 0;
     if (this._notifyTimer) {
       clearTimeout(this._notifyTimer);
       this._notifyTimer = null;

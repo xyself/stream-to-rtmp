@@ -33,6 +33,7 @@ class FFmpegService {
 
     this.ffmpegCommand = null;
     this.stoppedManually = false;
+    this.isFallbackMode = false;
     this.streamUrl = null;
 
     this.trafficStats = {
@@ -111,6 +112,7 @@ class FFmpegService {
     }
 
     this.stoppedManually = false;
+    this.isFallbackMode = false;
     this.streamUrl = streamUrl;
     this.failedOutputs = new Set();
     this.trafficStats = {
@@ -181,6 +183,106 @@ class FFmpegService {
 
     this.ffmpegCommand = proc;
     this.onStart(`${ffmpegPath} ${args.join(' ')}`);
+    return proc;
+  }
+
+  buildFallbackArgs(imagePath) {
+    const args = [
+      '-loglevel', 'warning',
+      '-stats',
+      '-nostdin',
+      '-re',
+      '-loop', '1',
+      '-framerate', '1',
+      '-i', imagePath,
+      '-f', 'lavfi',
+      '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
+      '-c:v', config.ffmpeg.videoCodec || 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'stillimage',
+      '-pix_fmt', 'yuv420p',
+      '-s', '1280x720',
+      '-r', '15',
+      '-g', '30',
+      '-b:v', '250k',
+      '-maxrate', '300k',
+      '-bufsize', '600k',
+      '-c:a', config.ffmpeg.audioCodec || 'aac',
+      '-b:a', '64k',
+      '-ar', '48000',
+      '-ac', '2',
+      ...(config.ffmpeg.threads > 0 ? ['-threads', String(config.ffmpeg.threads)] : []),
+    ];
+
+    if (this.targetUrls.length === 1) {
+      args.push('-f', 'flv', this.targetUrls[0]);
+    } else {
+      const tee = this.targetUrls.map((t) => `[f=flv:onfail=ignore]${t}`).join('|');
+      args.push('-f', 'tee', tee);
+    }
+    return args;
+  }
+
+  startFallback(imagePath) {
+    if (!imagePath) throw new Error('缺少保底图路径');
+    if (!this.targetUrls || this.targetUrls.length === 0) {
+      throw new Error('缺少推流目标地址');
+    }
+
+    if (this.ffmpegCommand) {
+      this.stop();
+    }
+
+    this.stoppedManually = false;
+    this.isFallbackMode = true;
+    this.streamUrl = imagePath;
+    this.failedOutputs = new Set();
+
+    const args = this.buildFallbackArgs(imagePath);
+    const ffmpegPath = process.env.FFMPEG_PATH || config.ffmpeg.bin;
+    this.lastArgs = [ffmpegPath, ...args];
+    const proc = spawn(ffmpegPath, args);
+
+    this.stderrBuffer = [];
+
+    proc.stderr.on('data', (data) => {
+      if (this.ffmpegCommand !== proc) return;
+      const text = data.toString();
+      text.split(/[\r\n]+/).forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        const isProgress = this.parseStderrProgress(trimmed);
+        this.parseOutputErrors(trimmed);
+        if (!isProgress) {
+          this.stderrBuffer.push(trimmed);
+          if (this.stderrBuffer.length > 15) this.stderrBuffer.shift();
+        }
+      });
+    });
+
+    proc.on('error', (err) => {
+      if (this.ffmpegCommand !== proc) return;
+      this.ffmpegCommand = null;
+      this.isFallbackMode = false;
+      this.onError(err);
+    });
+
+    proc.on('exit', (code, signal) => {
+      if (this.ffmpegCommand !== proc) return;
+      this.ffmpegCommand = null;
+      this.isFallbackMode = false;
+      if (this.stoppedManually) return;
+      if (signal || (code !== 0 && code !== null)) {
+        const lastErrors = this.stderrBuffer.join('\n');
+        const reason = signal ? `signal ${signal}` : `code ${code}`;
+        const errorMsg = `Fallback FFmpeg exited with ${reason}${lastErrors ? `:\n${lastErrors}` : ''}`;
+        this.onError(new Error(errorMsg));
+      } else {
+        this.onEnd();
+      }
+    });
+
+    this.ffmpegCommand = proc;
     return proc;
   }
 
@@ -263,6 +365,7 @@ class FFmpegService {
   }
 
   stop() {
+    this.isFallbackMode = false;
     if (!this.ffmpegCommand) return Promise.resolve();
     this.stoppedManually = true;
     const cmdRef = this.ffmpegCommand;
@@ -325,6 +428,7 @@ class FFmpegService {
       ...this.trafficStats,
       lastArgs: this.lastArgs,
       running: !!this.ffmpegCommand && !this.stoppedManually,
+      fallbackActive: !!this.isFallbackMode && !!this.ffmpegCommand && !this.stoppedManually,
     };
   }
 
