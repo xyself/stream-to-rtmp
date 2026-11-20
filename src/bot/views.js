@@ -204,10 +204,11 @@ function renderDashboard({ system = {}, stats = {}, recentErrors = [] } = {}) {
     `<b>📊 全局控制台</b>（运行：${escapeHtml(system.uptime || '未知')}）`,
   ];
 
-  if (system.runtimeLabel || system.nodeVersion) {
+  if (system.runtimeLabel || system.nodeVersion || system.gitSha) {
     const envTag = system.runtimeLabel ? escapeHtml(system.runtimeLabel) : 'Linux';
     const nodeTag = system.nodeVersion ? ` · Node ${escapeHtml(system.nodeVersion)}` : '';
-    lines.push(`🌐 环境：<code>${envTag}${nodeTag}</code>`);
+    const shaTag = system.gitSha ? ` · <code>${escapeHtml(system.gitSha)}</code>` : '';
+    lines.push(`🌐 环境：<code>${envTag}${nodeTag}</code>${shaTag}`);
   }
 
   lines.push('');

@@ -15,11 +15,17 @@ const ffmpegInstaller = require('../services/ffmpeg-installer');
 const fallbackImage = require('../services/fallback-image');
 const housekeeping = require('../core/housekeeping');
 const runtimeEnv = require('../core/runtime-env');
+const updater = require('../services/updater');
 const {
   safeEditMessageText,
   sendEphemeralMessage,
   sendEphemeralPhoto,
 } = require('./ephemeral');
+
+let shutdownHandler = null;
+function setShutdownHandler(fn) {
+  shutdownHandler = fn;
+}
 
 function getFfmpegMeta(forceRefresh = false) {
   const info = ffmpegInstaller.getFfmpegRuntimeInfo({ forceRefresh });
@@ -105,7 +111,9 @@ function buildDashboardKeyboard() {
     .row()
     .text('☁️ 上传到 Gist', 'global_sync_gist')
     .text('📥 从 Gist 恢复', 'global_restore_gist')
-    .text(isFreeBsdOrServ00 ? 'ℹ️ FFmpeg 说明' : '⬆️ 升级FFmpeg', isFreeBsdOrServ00 ? 'global_ffmpeg_info' : 'global_update_ffmpeg');
+    .text(isFreeBsdOrServ00 ? 'ℹ️ FFmpeg 说明' : '⬆️ 升级FFmpeg', isFreeBsdOrServ00 ? 'global_ffmpeg_info' : 'global_update_ffmpeg')
+    .row()
+    .text('🚀 检查更新与重启', 'global_check_update');
   return keyboard;
 }
 
@@ -260,6 +268,7 @@ function getSystemInfo(opts = {}) {
     dbSize,
     runtimeLabel,
     nodeVersion: process.version,
+    gitSha: opts.gitSha !== undefined ? opts.gitSha : updater.getCurrentVersion().sha,
     ffmpegVersion: ffMeta.version,
     ffmpegPath: ffMeta.resolvedPath,
     ffmpegSource: ffMeta.source,
@@ -330,6 +339,7 @@ async function registerBotCommands(bot) {
     { command: 'gist',     description: '☁️ Gist 云端同步与恢复' },
     { command: 'notify',   description: '🔔 通知推送开关设置' },
     { command: 'ffmpeg',   description: '🛠️ 查看 FFmpeg 推流参数' },
+    { command: 'update',   description: '🚀 检查更新并远程重启' },
     { command: 'cancel',   description: '❎ 取消当前输入会话' },
     { command: 'help',     description: '❓ 快捷操作与命令速查' },
   ];
@@ -1278,6 +1288,92 @@ function createRelayBot(token = process.env.TG_TOKEN) {
     await refreshDashboard(ctx);
   });
 
+  // ─── 远程一键检查更新与重启 ───────────────────────────────────────────────
+  const handleCheckUpdate = async (ctx, isCallback = false) => {
+    if (isCallback) {
+      await ctx.answerCallbackQuery('⏳ 正在检查 GitHub 远程版本...').catch(() => {});
+    }
+    const res = await updater.checkUpdate();
+    if (!res.ok) {
+      const errText = `❌ <b>检查更新失败</b>\n\n${views.escapeHtml(res.error || '未知错误')}`;
+      if (isCallback) {
+        await ephemeralReply(ctx, errText, { parse_mode: 'HTML' });
+      } else {
+        await ctx.reply(errText, { parse_mode: 'HTML' });
+      }
+      return;
+    }
+
+    if (!res.hasUpdate) {
+      const tip = `✅ <b>当前已是最新版本！</b>\n\nCommit: <code>${views.escapeHtml(res.localSha)}</code>\n暂无可用更新。`;
+      if (isCallback) {
+        await ephemeralReply(ctx, tip, { parse_mode: 'HTML' });
+      } else {
+        await ctx.reply(tip, { parse_mode: 'HTML' });
+      }
+      return;
+    }
+
+    const lines = [
+      `🚀 <b>发现新版本！</b>`,
+      '',
+      `📌 当前版本：<code>${views.escapeHtml(res.localSha)}</code>`,
+      `🌟 最新版本：<code>${views.escapeHtml(res.remoteSha)}</code>（落后 ${res.commitsBehind} 个提交）`,
+      '',
+      `📝 <b>更新内容：</b>`,
+      ...res.commitLogs.map((log) => `• ${views.escapeHtml(log)}`),
+      '',
+    ];
+    if (res.hasPackageJsonChange) {
+      lines.push('📦 <i>检测到依赖项更新，拉取后将自动增量安装依赖。</i>');
+      lines.push('');
+    }
+    lines.push('⚠️ <i>更新过程预计耗时 3~5 秒，期间如有正在推流的直播将短暂重连。是否继续？</i>');
+
+    const kb = new InlineKeyboard()
+      .text('🚀 确认更新并重启', 'global_do_update')
+      .text('❌ 取消', 'global_cancel_update');
+
+    if (isCallback) {
+      await safeEditMessageText(ctx, lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
+    } else {
+      await ctx.reply(lines.join('\n'), { parse_mode: 'HTML', reply_markup: kb });
+    }
+  };
+
+  bot.command('update', async (ctx) => {
+    await handleCheckUpdate(ctx, false);
+  });
+
+  bot.callbackQuery('global_check_update', async (ctx) => {
+    await handleCheckUpdate(ctx, true);
+  });
+
+  bot.callbackQuery('global_cancel_update', async (ctx) => {
+    await ctx.answerCallbackQuery('已取消更新').catch(() => {});
+    await refreshDashboard(ctx);
+  });
+
+  bot.callbackQuery('global_do_update', async (ctx) => {
+    await ctx.answerCallbackQuery('⏳ 开始执行远程更新...').catch(() => {});
+    await safeEditMessageText(ctx, '⏳ <b>正在拉取最新代码并校验语法...</b>\n\n服务将在 3~5 秒内自动重启拉起，请稍候。', { parse_mode: 'HTML' });
+    try {
+      const notifyChatId = ctx.chat?.id;
+      await updater.applyUpdate({
+        notifyChatId,
+        onProgress: (msg) => logger.log(`[updater] ${msg}`),
+      });
+      // 触发退出码 100 优雅重启
+      if (typeof shutdownHandler === 'function') {
+        shutdownHandler(100);
+      } else {
+        setTimeout(() => process.exit(100), 1000).unref();
+      }
+    } catch (err) {
+      await safeEditMessageText(ctx, `❌ <b>更新失败并已回滚</b>\n\n${views.escapeHtml(err.message)}`, { parse_mode: 'HTML' });
+    }
+  });
+
   roomHandlers.register(bot, sharedDeps);
   rtmpHandlers.register(bot, sharedDeps);
 
@@ -1302,6 +1398,7 @@ function createRelayBot(token = process.env.TG_TOKEN) {
   // 暴露给外部（如 housekeeping 定时器）
   bot._pushWidgetUpdate = _pushWidgetUpdate;
   bot._widgetMessages = {};
+  bot.setShutdownHandler = setShutdownHandler;
 
   return bot;
 }
@@ -1443,5 +1540,6 @@ module.exports.buildNotificationKeyboard = buildNotificationKeyboard;
 module.exports.buildAlertKeyboard = buildAlertKeyboard;
 module.exports.registerBotCommands = registerBotCommands;
 module.exports.saveRoomTask = roomHandlers.saveRoomTask;
+module.exports.setShutdownHandler = setShutdownHandler;
 
 

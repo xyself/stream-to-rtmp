@@ -1564,6 +1564,13 @@ function renderDashboard() {
                 <span class="kv-val tabular" id="sys-node-ver">—</span>
               </div>
               <div class="kv-row">
+                <span class="kv-label">Git 代码版本</span>
+                <span class="kv-val" style="display:flex;align-items:center;gap:6px;">
+                  <span class="tabular" id="sys-git-ver">—</span>
+                  <button id="btn-check-update" class="btn btn-outline" style="padding:2px 8px;font-size:11px;cursor:pointer;">检查更新</button>
+                </span>
+              </div>
+              <div class="kv-row">
                 <span class="kv-label">FFmpeg 引擎版本</span>
                 <span class="kv-val tabular" id="sys-ffmpeg-ver">—</span>
               </div>
@@ -2763,6 +2770,47 @@ function renderDashboard() {
           ? '开启 (libx264 转码)'
           : (d.transcodeAudio ? '音频标准化 (视频 copy + AAC 48kHz)' : '关闭 (原生流 copy 转发)');
         document.getElementById('sys-node-ver').textContent = d.nodeVersion || '—';
+        const gitVerEl = document.getElementById('sys-git-ver');
+        if (gitVerEl) gitVerEl.textContent = d.gitVersion || '—';
+
+        const btnCheckUpdate = document.getElementById('btn-check-update');
+        if (btnCheckUpdate && !btnCheckUpdate._bound) {
+          btnCheckUpdate._bound = true;
+          btnCheckUpdate.addEventListener('click', async () => {
+            btnCheckUpdate.textContent = '检查中...';
+            btnCheckUpdate.disabled = true;
+            try {
+              const res = await fetch('/api/system/check-update?token=' + encodeURIComponent(authToken()));
+              const data = await res.json();
+              if (!data.ok) throw new Error(data.error || '检查失败');
+              if (!data.hasUpdate) {
+                alert('当前已是最新版本 (' + data.localSha + ')');
+              } else {
+                const logs = (data.commitLogs || []).map(function(l) { return '• ' + l; });
+                const promptLines = [
+                  '发现新版本: ' + data.remoteSha + ' (落后 ' + data.commitsBehind + ' 个提交)',
+                  '',
+                  '更新内容:'
+                ].concat(logs).concat(['', '是否立即拉取更新并秒级重启？']);
+                const confirmed = confirm(promptLines.join('\\n'));
+                if (confirmed) {
+                  btnCheckUpdate.textContent = '更新重启中...';
+                  const upRes = await fetch('/api/system/apply-update?token=' + encodeURIComponent(authToken()), { method: 'POST' });
+                  const upData = await upRes.json();
+                  if (!upData.ok) throw new Error(upData.error || '更新失败');
+                  alert('代码已更新，服务正在秒级拉起，页面将在 3 秒后刷新');
+                  setTimeout(() => location.reload(), 3500);
+                  return;
+                }
+              }
+            } catch (err) {
+              alert('检查更新失败: ' + err.message);
+            } finally {
+              btnCheckUpdate.textContent = '检查更新';
+              btnCheckUpdate.disabled = false;
+            }
+          });
+        }
         document.getElementById('sys-ffmpeg-ver').textContent = ffVer;
         document.getElementById('sys-ffmpeg-path').textContent = ffPath;
         document.getElementById('sys-ffmpeg-source').textContent = ffSource + (ffCustom ? ' (自定义生效)' : ' (系统默认)');

@@ -255,6 +255,7 @@ function createApp({
             ffmpegBanner: ffInfo.rawFirstLine,
             transcodeVideo: db.getSetting?.('transcode_video') === '1',
             transcodeAudio: db.getSetting?.('transcode_audio') === '1',
+            gitVersion: require('./src/services/updater').getCurrentVersion().sha,
             generatedAt: new Date().toISOString(),
 
             // 隐私白名单：只暴露运营指标，不返回房间号 / 主播名 / 标题
@@ -270,6 +271,26 @@ function createApp({
               startedAt: task.traffic?.startedAt,
             })),
           });
+        }
+
+        if (method === 'GET' && pathname === '/api/system/check-update') {
+          if (!isAuthorized(req, urlObj)) return sendJson(res, 401, { error: 'unauthorized' });
+          const updater = require('./src/services/updater');
+          const result = await updater.checkUpdate();
+          return sendJson(res, 200, result);
+        }
+
+        if (method === 'POST' && pathname === '/api/system/apply-update') {
+          if (!isAuthorized(req, urlObj)) return sendJson(res, 401, { error: 'unauthorized' });
+          const updater = require('./src/services/updater');
+          try {
+            const result = await updater.applyUpdate();
+            sendJson(res, 200, { ok: true, result });
+            setTimeout(() => gracefulShutdown('WEB_REMOTE_UPDATE', 100), 1000).unref();
+            return;
+          } catch (err) {
+            return sendJson(res, 500, { ok: false, error: err.message });
+          }
         }
 
         if (method === 'GET' && pathname === '/api/curve') {
@@ -493,6 +514,10 @@ function createApp({
         logger.error('后台杂务启动失败:', err.message);
       }
 
+      if (typeof bot?.setShutdownHandler === 'function') {
+        bot.setShutdownHandler((exitCode = 100) => gracefulShutdown('REMOTE_UPDATE', exitCode));
+      }
+
       if (gistSync.isConfigured()) {
         gistSync.seedContentCache(db);
       }
@@ -555,6 +580,25 @@ function createApp({
                   logger.error(`发送重启通知失败 (chatId: ${id}):`, err.message);
                 }
               }
+            }
+
+            try {
+              const updater = require('./src/services/updater');
+              const updateState = updater.consumeUpdateState();
+              if (updateState && updateState.notifyChatId && chatIds?.has(String(updateState.notifyChatId))) {
+                const fromSha = updateState.fromSha || '旧版本';
+                const toSha = updateState.toSha || '最新版';
+                const updateMsg = [
+                  '🎉 <b>系统远程一键更新成功！</b>',
+                  '',
+                  `📦 <b>版本跃迁</b>：<code>${fromSha}</code> ➔ <code>${toSha}</code>`,
+                  `⚙️ <b>运行时</b>：Node <code>${process.version}</code>`,
+                  `🟢 <b>状态</b>：服务与推流监控已全部恢复。`,
+                ].join('\n');
+                await bot.api.sendMessage(updateState.notifyChatId, updateMsg, { parse_mode: 'HTML' }).catch(() => {});
+              }
+            } catch (uErr) {
+              logger.error('检查更新恢复状态异常:', uErr.message);
             }
           },
         });
