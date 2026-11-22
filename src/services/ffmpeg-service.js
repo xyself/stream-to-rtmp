@@ -136,6 +136,7 @@ class FFmpegService {
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
     } else {
+      args.push('-map', '0:v:0?', '-map', '0:a:0?');
       const tee = this.targetUrls.map((t) => `[f=flv:onfail=ignore]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
@@ -217,6 +218,7 @@ class FFmpegService {
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
     } else {
+      args.push('-map', '0:v:0?', '-map', '1:a:0?');
       const tee = this.targetUrls.map((t) => `[f=flv:onfail=ignore]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
