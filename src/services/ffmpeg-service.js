@@ -136,7 +136,7 @@ class FFmpegService {
     if (this.targetUrls.length === 1) {
       args.push('-f', 'flv', this.targetUrls[0]);
     } else {
-      args.push('-map', '0:v:0?', '-map', '0:a:0?');
+      args.push('-map', '0:v:0?', '-map', '0:a:0?', '-tag:v', '7', '-tag:a', '10');
       const tee = this.targetUrls.map((t) => `[f=flv:onfail=ignore]${t}`).join('|');
       args.push('-f', 'tee', tee);
     }
