@@ -35,6 +35,7 @@ class FFmpegService {
     this.stoppedManually = false;
     this.isFallbackMode = false;
     this.streamUrl = null;
+    this.sourceBitrateKbps = 0;
 
     this.trafficStats = {
       sessionBytes: 0,
@@ -114,6 +115,8 @@ class FFmpegService {
     this.stoppedManually = false;
     this.isFallbackMode = false;
     this.streamUrl = streamUrl;
+    const originBitrateMatch = streamUrl.match(/origin_bitrate=(\d+)/i) || streamUrl.match(/bitrate=(\d+)/i);
+    this.sourceBitrateKbps = originBitrateMatch ? parseFloat(originBitrateMatch[1]) : 0;
     this.failedOutputs = new Set();
     this.trafficStats = {
       sessionBytes: 0,
@@ -422,27 +425,51 @@ class FFmpegService {
   parseStderrProgress(line) {
     let matched = false;
     const nowMs = Date.now();
+    const timeMatch = line.match(/time=\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/i);
+    const speedMatch = line.match(/speed=\s*(\d+\.?\d*)x/i);
+    const sizeMatch = line.match(/size=\s*(\d+)\s*(?:KiB|kB)/i);
     const bitrateMatch = line.match(/bitrate=\s*(\d+\.?\d*)\s*kbits?\/s/i);
+
+    const isStatsLine = Boolean(
+      bitrateMatch ||
+      /bitrate=\s*N\/A/i.test(line) ||
+      sizeMatch ||
+      /size=\s*N\/A/i.test(line) ||
+      timeMatch ||
+      speedMatch ||
+      /^(?:frame|size)=\s*\d+/i.test(line)
+    );
+
+    if (isStatsLine) {
+      this.trafficStats.lastProgressAt = nowMs;
+      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
+      matched = true;
+    }
+
     if (bitrateMatch) {
       this.trafficStats.bitrateKbps = parseFloat(bitrateMatch[1]);
-      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
-      this.trafficStats.lastProgressAt = nowMs;
-      matched = true;
     } else if (/bitrate=\s*N\/A/i.test(line)) {
-      this.trafficStats.bitrateKbps = 0;
-      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
-      matched = true;
+      if (this.sourceBitrateKbps && (!speedMatch || parseFloat(speedMatch[1]) > 0)) {
+        this.trafficStats.bitrateKbps = this.sourceBitrateKbps;
+      } else {
+        this.trafficStats.bitrateKbps = 0;
+      }
     }
-    const sizeMatch = line.match(/size=\s*(\d+)\s*(?:KiB|kB)/i);
+
     if (sizeMatch) {
       this.trafficStats.sessionBytes = parseInt(sizeMatch[1], 10) * 1024;
-      this.trafficStats.updatedAt = new Date(nowMs).toISOString();
-      this.trafficStats.lastProgressAt = nowMs;
-      matched = true;
+    } else if (timeMatch) {
+      const hours = parseInt(timeMatch[1], 10);
+      const minutes = parseInt(timeMatch[2], 10);
+      const seconds = parseFloat(timeMatch[3]);
+      const totalSecs = hours * 3600 + minutes * 60 + seconds;
+      if (totalSecs > 0) {
+        const effectiveBitrate = this.trafficStats.bitrateKbps || this.sourceBitrateKbps || 2500;
+        const estimatedBytes = Math.round(totalSecs * (effectiveBitrate * 1000 / 8));
+        this.trafficStats.sessionBytes = Math.max(this.trafficStats.sessionBytes || 0, estimatedBytes);
+      }
     }
-    if (!matched && /^(?:frame|size)=\s*\d+/i.test(line)) {
-      matched = true;
-    }
+
     return matched;
   }
 

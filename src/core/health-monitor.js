@@ -100,7 +100,11 @@ class StreamHealthMonitor {
     }
 
     const isZeroBitrate = (bitrateKbps || 0) <= 0;
-    const stalledThisTick = runtimeMs > this.cfg.freezeGraceMs && (isZeroBitrate || progressStale || bytesStagnant);
+    const progressFresh =
+      typeof lastProgressAt === 'number' && lastProgressAt > 0 && nowMs - lastProgressAt <= staleThreshold;
+    const stalledThisTick =
+      runtimeMs > this.cfg.freezeGraceMs &&
+      (progressStale || (!progressFresh && (isZeroBitrate || bytesStagnant)));
 
     // 1. 画面冻结 / 僵尸流检测（综合码率为 0、进度无更新、字节停滞三个维度）
     if (stalledThisTick) {

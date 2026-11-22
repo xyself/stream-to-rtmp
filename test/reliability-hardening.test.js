@@ -40,6 +40,13 @@ test('FFmpegService puts -rw_timeout and -fflags before -i, terminates -headers 
   assert.equal(isProg2, true);
   assert.equal(svc.trafficStats.bitrateKbps, 0, 'bitrate=N/A must reset bitrateKbps to 0');
 
+  // Multi-target tee mode progress: size=N/A time=00:00:02.02 bitrate=N/A speed=1.38x
+  svc.sourceBitrateKbps = 3200;
+  const isTeeProg = svc.parseStderrProgress('size=N/A time=00:00:02.00 bitrate=N/A speed=1.38x');
+  assert.equal(isTeeProg, true);
+  assert.equal(svc.trafficStats.bitrateKbps, 3200, 'bitrate=N/A with active speed should use sourceBitrateKbps');
+  assert.ok(svc.trafficStats.sessionBytes > 0, 'sessionBytes should be estimated from stream time in tee mode');
+
   const isErrorLine = svc.parseStderrProgress('[flv @ 0x1] Server returned 404 Not Found');
   assert.equal(isErrorLine, false, 'Error lines must not be classified as progress lines');
 
